@@ -1,0 +1,22 @@
+# Only the frontend and reviewed routing configuration belong on Vercel.
+**
+!src/
+!src/**
+!public/
+!public/**
+!index.html
+!package.json
+!package-lock.json
+!tsconfig.json
+!vite.config.ts
+!vercel.json
+!deployment/
+!deployment/vercel.preview.json
+# Never upload local secrets, even if a future allow rule changes.
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+backend/

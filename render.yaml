@@ -1,0 +1,20 @@
+# Optional Blueprint alternative to the dashboard steps in DEPLOYMENT.md.
+# One process on one instance: conversation sessions live in Python memory.
+services:
+  - type: web
+    name: voice-companion-api
+    runtime: python
+    plan: free
+    region: singapore
+    numInstances: 1
+    autoDeployTrigger: "off"
+    buildCommand: python -m pip install -r backend/requirements.txt
+    startCommand: python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /api/health
+    envVars:
+      - key: GNANI_API_KEY
+        sync: false
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"

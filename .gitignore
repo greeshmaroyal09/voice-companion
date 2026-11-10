@@ -20,3 +20,5 @@ __pycache__/
 dist/
 *.pem
 *.key
+.vercel/
+deployment/vercel.preview.json
