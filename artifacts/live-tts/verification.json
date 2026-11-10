@@ -1,0 +1,12 @@
+{
+  "provider_status": 200,
+  "provider_bytes": 130604,
+  "wav_bytes": 130604,
+  "header_repaired": true,
+  "sample_rate": 24000,
+  "frames": 65280,
+  "seconds": 2.72,
+  "peak": 27480,
+  "rms": 5428.86,
+  "certificate_verification": true
+}

@@ -1,0 +1,302 @@
+import { useEffect, useRef, useState } from 'react';
+import { ArrowUpRight, AudioLines, Check, CircleAlert, Headphones, Languages, LoaderCircle, Mic, ShieldCheck, Square, Volume2, X } from 'lucide-react';
+import { MAX_SECONDS, microphoneError, WavRecorder } from './audio';
+import { apiRequest } from './api';
+import { Checklist, type Preparation } from './Checklist';
+
+type Stage = 'idle' | 'permission' | 'recording' | 'transcribing';
+type Turn = { session_id: string; turn_id: string; transcript: string; reply: string; details: Record<string, string | null>; preparation?: Preparation };
+const SESSION_KEY = 'voice-companion-session';
+
+export default function App() {
+  const [stage, setStage] = useState<Stage>('idle');
+  const [seconds, setSeconds] = useState(0);
+  const [level, setLevel] = useState(0);
+  const [transcript, setTranscript] = useState('');
+  const [reply, setReply] = useState('');
+  const [audioUrl, setAudioUrl] = useState('');
+  const [playing, setPlaying] = useState(false);
+  const [audioBusy, setAudioBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [setup, setSetup] = useState('');
+  const [history, setHistory] = useState<Turn[]>([]);
+  const [details, setDetails] = useState<Record<string, string | null>>({});
+  const [preparation, setPreparation] = useState<Preparation>();
+  const [typed, setTyped] = useState('');
+  const [restoring, setRestoring] = useState(true);
+  const sessionId = useRef<string | null>(null);
+  const latestTurn = useRef<Turn | null>(null);
+  const recorder = useRef<WavRecorder | null>(null);
+  const audio = useRef<HTMLAudioElement>(null);
+  const active = useRef(false);
+  const alive = useRef(true);
+  const startedAt = useRef(0);
+  const stopRef = useRef<() => void>(() => {});
+  const audioRequest = useRef(0);
+  const audioRequestId = useRef('');
+  const activeAudioUrlRequestId = useRef('');
+  const audioUrlRequestIds = useRef(new Map<string, string>());
+
+  useEffect(() => {
+    alive.current = true;
+    let cancelled = false;
+    apiRequest('/api/health').then((response) => response.json()).then((data) => {
+      if (alive.current && !data.gnani_configured) setSetup('వాయిస్ సేవ ఇంకా సిద్ధం కాలేదు. టైప్ చేసి కొనసాగించవచ్చు.');
+    }).catch(() => { if (alive.current) setSetup('సేవకు కనెక్ట్ కాలేకపోయాము. కొద్దిసేపటి తర్వాత ప్రయత్నించండి.'); });
+    const saved = sessionStorage.getItem(SESSION_KEY);
+    if (saved) {
+      apiRequest('/api/conversation/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: saved }) })
+        .then((response) => response.json()).then((data) => {
+          if (cancelled) return;
+          sessionId.current = saved;
+          const turns: Turn[] = data.turns.map((turn: Turn) => ({ ...turn, session_id: saved, details: data.details }));
+          setHistory(turns); setDetails(data.details); setPreparation(data.preparation);
+          const last = turns.at(-1);
+          if (last) { latestTurn.current = last; setTranscript(last.transcript); setReply(last.reply); }
+        }).catch(() => { if (!cancelled) { sessionStorage.removeItem(SESSION_KEY); setError('పాత సంభాషణను తెరవలేకపోయాము. కొత్తగా ప్రారంభించండి.'); } })
+        .finally(() => { if (!cancelled) setRestoring(false); });
+    } else setRestoring(false);
+    return () => { cancelled = true; alive.current = false; recorder.current?.dispose(); };
+  }, []);
+
+  useEffect(() => () => {
+    if (audioUrl) {
+      const requestId = audioUrlRequestIds.current.get(audioUrl) ?? 'unknown';
+      console.info(`[voice-audio] request_id=${requestId} stage=object_url_revoked source=blob`);
+      URL.revokeObjectURL(audioUrl);
+      audioUrlRequestIds.current.delete(audioUrl);
+      if (activeAudioUrlRequestId.current === requestId) activeAudioUrlRequestId.current = '';
+    }
+  }, [audioUrl]);
+
+  useEffect(() => {
+    if (stage !== 'recording') return;
+    const timer = window.setInterval(() => {
+      const elapsed = (Date.now() - startedAt.current) / 1000;
+      setSeconds(Math.min(MAX_SECONDS, Math.floor(elapsed)));
+      if (elapsed >= MAX_SECONDS) stopRef.current();
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [stage]);
+
+  async function generateAudio(turn = latestTurn.current) {
+    if (!turn) return;
+    const request = ++audioRequest.current;
+    const requestId = globalThis.crypto?.randomUUID?.() ?? `audio-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    audioRequestId.current = requestId;
+    setAudioBusy(true);
+    try {
+      console.info(`[voice-audio] request_id=${requestId} stage=request_started`);
+      const response = await apiRequest('/api/reply-audio', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId }, body: JSON.stringify({ session_id: turn.session_id, turn_id: turn.turn_id }) });
+      const blob = await response.blob();
+      const contentType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ?? '';
+      console.info(`[voice-audio] request_id=${requestId} stage=response status=${response.status} content_type=${contentType || 'missing'} body_bytes=${blob.size}`);
+      if (!blob.size || contentType !== 'audio/wav' || blob.type.toLowerCase() !== 'audio/wav') throw new Error('The audio service returned an empty or unsupported audio file. Retry audio or continue the conversation.');
+      if (alive.current && request === audioRequest.current) {
+        const url = URL.createObjectURL(blob);
+        audioUrlRequestIds.current.set(url, requestId);
+        activeAudioUrlRequestId.current = requestId;
+        console.info(`[voice-audio] request_id=${requestId} stage=object_url_created source=blob`);
+        setAudioUrl(url);
+      } else {
+        console.info(`[voice-audio] request_id=${requestId} stage=stale_response_discarded`);
+      }
+    } catch (err) {
+      const category = err instanceof Error && /TLS certificate/i.test(err.message) ? 'tls_certificate_verify_failed' : err instanceof Error && /Gnani .* returned HTTP/i.test(err.message) ? 'provider_http_error' : err instanceof Error ? err.name : 'unknown';
+      console.warn(`[voice-audio] request_id=${requestId} stage=request_failed category=${category}`);
+      if (alive.current && request === audioRequest.current) setError(err instanceof Error ? err.message : 'Could not prepare reply audio. Retry audio or continue the conversation.');
+    } finally {
+      if (alive.current && request === audioRequest.current) setAudioBusy(false);
+    }
+  }
+
+  function acceptTurn(turn: Turn) {
+    ++audioRequest.current;
+    sessionId.current = turn.session_id; latestTurn.current = turn;
+    sessionStorage.setItem(SESSION_KEY, turn.session_id);
+    setTranscript(turn.transcript); setReply(turn.reply); setDetails(turn.details); setPreparation(turn.preparation);
+    setHistory((previous) => [...previous, turn].slice(-50));
+    setAudioUrl('');
+  }
+
+  async function sendText(message = typed) {
+    if (!message.trim() || active.current || restoring) return;
+    active.current = true; setError(''); setStage('transcribing');
+    audio.current?.pause(); setPlaying(false);
+    try {
+      const typedRequestId = `typed-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
+      console.info(`[voice-chat] request_id=${typedRequestId} stage=typed_request_started`);
+      const response = await apiRequest('/api/conversation', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Request-ID': typedRequestId }, body: JSON.stringify({ text: message, session_id: sessionId.current }) });
+      console.info(`[voice-chat] request_id=${typedRequestId} stage=typed_response status=${response.status}`);
+      const turn: Turn = await response.json();
+      acceptTurn(turn); setTyped('');
+      void generateAudio(turn);
+    } catch { setError('సందేశం పంపలేకపోయాము. మళ్లీ ప్రయత్నించండి. సంభాషణ గడువు ముగిస్తే New conversation నొక్కండి.'); }
+    finally { active.current = false; setStage('idle'); }
+  }
+
+  async function newConversation() {
+    if (active.current) return;
+    active.current = true; setRestoring(true);
+    ++audioRequest.current; setAudioBusy(false);
+    if (sessionId.current) {
+      try { await apiRequest('/api/conversation/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId.current }) }); }
+      catch { /* A restarted/offline backend already cannot serve this session. */ }
+    }
+    audio.current?.pause(); setPlaying(false); setAudioUrl('');
+    sessionId.current = null; latestTurn.current = null;
+    sessionStorage.removeItem(SESSION_KEY);
+    setHistory([]); setDetails({}); setPreparation(undefined); setTranscript(''); setReply(''); setError(''); setTyped('');
+    active.current = false; setRestoring(false);
+  }
+
+  async function startRecording() {
+    if (active.current) return;
+    active.current = true;
+    setError(''); setStage('permission');
+    audio.current?.pause(); setPlaying(false);
+    const next = new WavRecorder(); recorder.current = next;
+    try {
+      await next.start(setLevel);
+      if (!alive.current) { next.dispose(); return; }
+      setSeconds(0);
+      startedAt.current = Date.now();
+      setStage('recording');
+    } catch (err) {
+      if (alive.current) { setError(microphoneError(err)); setStage('idle'); }
+      active.current = false;
+    }
+  }
+
+  async function stopRecording() {
+    const current = recorder.current;
+    if (!current) return;
+    recorder.current = null;
+    setStage('transcribing'); setLevel(0);
+    let sttRequestId = '';
+    try {
+      const blob = await current.stop();
+      const form = new FormData(); form.append('audio', blob, 'recording.wav');
+      if (sessionId.current) form.append('session_id', sessionId.current);
+      sttRequestId = `stt-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
+      console.info(`[voice-stt] request_id=${sttRequestId} stage=upload_started content_type=${blob.type || 'missing'} body_bytes=${blob.size}`);
+      const response = await apiRequest('/api/transcribe', { method: 'POST', headers: { 'X-Request-ID': sttRequestId }, body: form });
+      console.info(`[voice-stt] request_id=${sttRequestId} stage=response status=${response.status} content_type=${response.headers.get('content-type')?.split(';')[0] ?? 'missing'}`);
+      const result = await response.json();
+      if (!alive.current) return;
+      acceptTurn(result); setSetup('');
+      void generateAudio(result);
+    } catch (err) {
+      if (sttRequestId) console.warn(`[voice-stt] request_id=${sttRequestId} stage=request_failed category=${err instanceof Error && /TLS certificate/i.test(err.message) ? 'tls_certificate_verify_failed' : err instanceof Error && /Gnani .* returned HTTP/i.test(err.message) ? 'provider_http_error' : err instanceof Error ? err.name : 'unknown'}`);
+      if (alive.current) setError(err instanceof Error ? err.message : 'Transcription failed. Please try again or type your message.');
+    } finally {
+      active.current = false;
+      if (alive.current) setStage('idle');
+    }
+  }
+  stopRef.current = () => { void stopRecording(); };
+
+  async function playReply() {
+    setError('');
+    if (playing) { audio.current?.pause(); setPlaying(false); return; }
+    if (!audioUrl) {
+      if (active.current || audioBusy) return;
+      await generateAudio();
+      return; // A fresh tap plays the audio, including browsers that restrict autoplay.
+    }
+    try {
+      if (audio.current) {
+        console.info(`[voice-audio] request_id=${activeAudioUrlRequestId.current} stage=play_started source=${audio.current.currentSrc.startsWith('blob:') ? 'blob' : 'other'}`);
+        audio.current.currentTime = 0;
+        await audio.current.play();
+      }
+    } catch (err) {
+      console.warn(`[voice-audio] request_id=${activeAudioUrlRequestId.current} stage=play_rejected category=${err instanceof Error ? err.name : 'unknown'}`);
+      setError('The reply audio is ready, but playback could not start. Check sound settings and tap Listen again.');
+    }
+  }
+
+  const recording = stage === 'recording';
+  const busy = restoring || ['permission', 'transcribing'].includes(stage);
+  const status = { idle: audioBusy ? 'Preparing audio · You can keep chatting' : audioUrl ? 'Reply ready to listen' : 'Ready when you are', permission: 'Waiting for microphone access…', recording: 'Listening to you…', transcribing: 'Turning your speech into words…' }[stage];
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="/" aria-label="Voice Companion home"><span className="brand-icon"><AudioLines size={23} /></span><span>voice<span className="brand-light">companion</span></span></a>
+        <span className="phase-badge"><span /> TELUGU <span className="badge-divider">/</span> CONVERSATION</span>
+      </header>
+
+      <main>
+        <div className="intro">
+          <div className="eyebrow">A LITTLE HELP. IN YOUR OWN WORDS.</div>
+          <h1>Your voice.<br className="mobile-break" /> A little more confidence.</h1>
+          <p>A companion for bank visits and everyday conversations.<br className="desktop-break" /> Let’s start by speaking in Telugu.</p>
+        </div>
+
+        <section className="companion-card" aria-label="Telugu voice companion">
+          <div className="card-topline">
+            <span className="session-label"><span className="live-dot" /> YOUR VOICE SPACE</span>
+            <span className="language-pill"><Languages size={16} /><span lang="te">తెలుగు</span><span className="language-english">Telugu</span></span>
+          </div>
+
+          {setup && <div className="setup-note"><CircleAlert size={17} /><span>{setup}</span><button aria-label="Dismiss setup notice" onClick={() => setSetup('')}><X size={16} /></button></div>}
+          <div className="conversation-tools"><span>{history.length ? `${history.length} turns · I’ll remember your details` : 'Start with what you need help with'}</span><button disabled={busy || recording} onClick={() => void newConversation()}>New conversation</button></div>
+          {Object.values(details).some(Boolean) && <div className="remembered" aria-label="Remembered details">{Object.entries(details).filter(([, value]) => value).map(([key, value]) => <span key={key}><strong>{key === 'intent' ? 'Purpose' : key.charAt(0).toUpperCase() + key.slice(1)}:</strong> {key === 'intent' ? ({ open_account: 'ఖాతా తెరవడం', close_account: 'ఖాతా మూసివేయడం', withdraw: 'డబ్బు తీసుకోవడం', deposit: 'డబ్బు జమ చేయడం', transfer: 'డబ్బు బదిలీ చేయడం', balance: 'బ్యాలెన్స్' }[value!] ?? value) : value}</span>)}</div>}
+
+          <div className="record-area">
+            <div className={`status ${recording ? 'is-recording' : ''}`} role="status">{busy && <LoaderCircle size={15} className="spin" />}{status}</div>
+            <div className={`mic-orbit ${recording ? 'recording' : ''}`}>
+              <button className="record-button" onClick={() => { if (recording) void stopRecording(); else void startRecording(); }} disabled={busy} aria-label={recording ? 'Stop recording' : 'Start recording'}>
+                {busy ? <LoaderCircle size={38} className="spin" /> : recording ? <Square size={32} fill="currentColor" /> : <Mic size={40} strokeWidth={1.7} />}
+              </button>
+            </div>
+            <h2>{recording ? 'Tap to stop' : busy ? 'One moment…' : 'Tap to speak'}</h2>
+            <p className="telugu-hint" lang="te">{recording ? 'మాట్లాడండి, నేను వింటున్నాను' : 'మీ మాటల్లో చెప్పండి'}</p>
+            <div className={`waveform ${recording ? 'active' : ''}`} aria-hidden="true">{Array.from({ length: 27 }, (_, i) => <span key={i} style={{ height: `${recording ? 5 + level * (12 + (Math.sin(i * 1.8) + 1) * 20) : 4 + (Math.sin(i * 1.8) + 1) * 5}px` }} />)}</div>
+            <span className="record-limit">{recording ? `0:${seconds.toString().padStart(2, '0')} / 0:25` : 'Speak naturally · Up to 25 seconds'}</span>
+          </div>
+
+          {error && <div className="error-note" role="alert"><CircleAlert size={19} /><div><strong>Let’s try that again</strong><p>{error}</p></div></div>}
+          <form className="text-entry" onSubmit={(event) => { event.preventDefault(); void sendText(); }}><label htmlFor="message">Or type a message / correct a detail</label><div><input id="message" value={typed} onChange={(event) => setTyped(event.target.value)} maxLength={2000} disabled={busy || recording} placeholder="SBI కాదు, HDFC bank" /><button type="submit" disabled={busy || recording || !typed.trim()}>Send</button></div></form>
+          <p className="privacy-note" lang="te">పత్రాలు అప్‌లోడ్ చేయవద్దు. ఆధార్/PAN నంబర్లు, OTP, PIN, పాస్‌వర్డ్‌లు చెప్పవద్దు. పత్రం పేరు మాత్రమే చాలు.</p>
+
+          <div className="conversation">
+            <section className={`text-panel transcript-panel ${transcript ? 'has-text' : ''}`}>
+              <div className="panel-label"><span><Mic size={14} /> YOU SAID</span>{transcript && <Check size={15} />}</div>
+              {transcript ? <p className="telugu-copy" lang="te">{transcript}</p> : <p className="placeholder">Your words will appear here.<br /><span>Telugu, with a little English? That’s okay.</span></p>}
+            </section>
+            <section className={`text-panel reply-panel ${reply ? 'has-text' : ''}`}>
+              <div className="panel-label"><span><AudioLines size={15} /> COMPANION’S REPLY</span><span className="reply-tag">TELUGU</span></div>
+              {reply ? <p className="telugu-copy" lang="te">{reply}</p> : <p className="placeholder">A reply, in a familiar voice.<br /><span>Record a message to begin.</span></p>}
+              <button className="listen-button" onClick={() => void playReply()} disabled={!reply || stage !== 'idle' || audioBusy} aria-label={audioBusy ? 'Preparing reply audio' : playing ? 'Stop reply playback' : audioUrl ? 'Listen to reply' : 'Retry generating reply audio'}>
+                {audioBusy ? <LoaderCircle size={18} className="spin" /> : playing ? <Square size={16} /> : <Volume2 size={18} />} {audioBusy ? 'Preparing reply audio…' : playing ? 'Stop playback' : audioUrl ? 'Listen to reply' : reply && stage === 'idle' ? 'Retry reply audio' : 'Listen to reply'}
+              </button>
+            </section>
+          </div>
+
+          {reply && <div className="conversation-actions">{['అది ఏంటి?', 'మళ్ళీ చెప్పు', 'నాకు అది లేదు', 'తర్వాత'].map(text => <button key={text} disabled={busy || recording} onClick={() => void sendText(text)} lang="te">{text}</button>)}</div>}
+          {!!preparation?.reply_sources?.length && <details className="conversation-history"><summary>ఈ సమాధానానికి ఆధారాలు / Reply sources</summary>{preparation.reply_sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a> · Checked {source.checked_on}</p>)}</details>}
+          <Checklist preparation={preparation} disabled={busy || recording} onAsk={text => void sendText(text)} />
+          {history.length > 1 && <section className="conversation-history" aria-label="Conversation history"><h3>ముందు మాట్లాడినవి / Earlier messages</h3>{history.slice(0, -1).map((turn) => <div key={turn.turn_id}><p lang="te"><strong>You:</strong> {turn.transcript}</p><p lang="te"><strong>Companion:</strong> {turn.reply}</p></div>)}</section>}
+
+          <div className="card-footer"><ShieldCheck size={16} /><span>Audio is sent to Gnani to process your voice.</span></div>
+        </section>
+
+        <aside className="try-note"><span className="try-icon"><Headphones size={19} /></span><div><strong>Not sure what to say?</strong><p>Try <span lang="te">“నాకు bank account తెరవాలి”</span> <span className="translation">— I’d like to open a bank account.</span></p></div><ArrowUpRight className="try-arrow" size={19} /></aside>
+        <p className="phase-note">One small conversation. One step forward.<span>Your details stay in this conversation. Correct them anytime; New conversation clears them.</span></p>
+      </main>
+
+      <footer className="page-footer"><span>MADE FOR EVERYDAY CONVERSATIONS</span><span>Telugu now <span className="footer-dot">·</span> Tamil, Hindi & Kannada next</span></footer>
+      <audio ref={audio} src={audioUrl || undefined}
+        onCanPlay={() => console.info(`[voice-audio] request_id=${activeAudioUrlRequestId.current} stage=can_play source=${audio.current?.currentSrc.startsWith('blob:') ? 'blob' : 'other'}`)}
+        onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+        onEnded={() => { console.info(`[voice-audio] request_id=${activeAudioUrlRequestId.current} stage=play_ended`); setPlaying(false); }}
+        onError={() => {
+          const mediaError = audio.current?.error;
+          console.warn(`[voice-audio] request_id=${activeAudioUrlRequestId.current} stage=decode_failed media_error=${mediaError?.code ?? 'unknown'} source=${audio.current?.currentSrc.startsWith('blob:') ? 'blob' : 'other'}`);
+          if (audioUrl) { setPlaying(false); setAudioUrl(''); setError('The audio arrived, but this browser could not decode it. Retry audio or continue the conversation.'); }
+        }} />
+    </div>
+  );
+}

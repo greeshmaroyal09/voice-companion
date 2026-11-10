@@ -1,0 +1,931 @@
+--- src/App.tsx (before)
++++ src/App.tsx
+@@ -1,8 +1,10 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { ArrowUpRight, AudioLines, Check, CircleAlert, Headphones, Languages, LoaderCircle, Mic, ShieldCheck, Square, Volume2, X } from 'lucide-react';
++import { ArrowDown, ArrowRight, AudioLines, CircleAlert, CornerDownLeft, Languages, ListChecks, LockKeyhole, MessageSquare, Mic, Plus, Send, ShieldCheck, X } from 'lucide-react';
+ import { MAX_SECONDS, microphoneError, WavRecorder } from './audio';
+ import { apiRequest } from './api';
+ import { Checklist, type Preparation } from './Checklist';
++import { Conversation } from './Conversation';
++import { VoiceControl } from './VoiceControl';
+ 
+ type Stage = 'idle' | 'permission' | 'recording' | 'transcribing';
+ type Turn = { session_id: string; turn_id: string; transcript: string; reply: string; details: Record<string, string | null>; preparation?: Preparation };
+@@ -24,6 +26,9 @@
+   const [preparation, setPreparation] = useState<Preparation>();
+   const [typed, setTyped] = useState('');
+   const [restoring, setRestoring] = useState(true);
++  const [requestMode, setRequestMode] = useState<'text' | 'voice'>('text');
++  const conversationEnd = useRef<HTMLDivElement>(null);
++  const composer = useRef<HTMLTextAreaElement>(null);
+   const sessionId = useRef<string | null>(null);
+   const latestTurn = useRef<Turn | null>(null);
+   const recorder = useRef<WavRecorder | null>(null);
+@@ -36,6 +41,17 @@
+   const audioRequestId = useRef('');
+   const activeAudioUrlRequestId = useRef('');
+   const audioUrlRequestIds = useRef(new Map<string, string>());
++
++  useEffect(() => {
++    if (history.length || stage === 'transcribing') conversationEnd.current?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'nearest' });
++  }, [history.length, stage]);
++
++  useEffect(() => {
++    if (composer.current) {
++      composer.current.style.height = 'auto';
++      composer.current.style.height = `${Math.min(composer.current.scrollHeight, 160)}px`;
++    }
++  }, [typed]);
+ 
+   useEffect(() => {
+     alive.current = true;
+@@ -218,76 +234,76 @@
+ 
+   const recording = stage === 'recording';
+   const busy = restoring || ['permission', 'transcribing'].includes(stage);
+-  const status = { idle: audioBusy ? 'Preparing audio · You can keep chatting' : audioUrl ? 'Reply ready to listen' : 'Ready when you are', permission: 'Waiting for microphone access…', recording: 'Listening to you…', transcribing: 'Turning your speech into words…' }[stage];
++  const loadingText = requestMode === 'text' ? 'Thinking through your question…' : 'Turning your speech into words…';
++  const status = restoring ? 'Restoring your conversation…' : {
++    idle: playing ? 'Playing your reply' : audioBusy ? 'Preparing reply audio' : audioUrl ? 'Your reply is ready to listen' : 'Ready when you are',
++    permission: 'Waiting for microphone access…', recording: 'Listening to you…', transcribing: loadingText,
++  }[stage];
++  const ask = (message: string) => { setRequestMode('text'); void sendText(message); };
++  const toggleRecording = () => { if (recording) void stopRecording(); else { setRequestMode('voice'); void startRecording(); } };
+ 
+   return (
+     <div className="app-shell">
+-      <header className="topbar">
+-        <a className="brand" href="/" aria-label="Voice Companion home"><span className="brand-icon"><AudioLines size={23} /></span><span>voice<span className="brand-light">companion</span></span></a>
+-        <span className="phase-badge"><span /> TELUGU <span className="badge-divider">/</span> CONVERSATION</span>
+-      </header>
+-
+-      <main>
+-        <div className="intro">
+-          <div className="eyebrow">A LITTLE HELP. IN YOUR OWN WORDS.</div>
+-          <h1>Your voice.<br className="mobile-break" /> A little more confidence.</h1>
+-          <p>A companion for bank visits and everyday conversations.<br className="desktop-break" /> Let’s start by speaking in Telugu.</p>
++      <a className="skip-link" href="#message">Skip to message</a>
++      <aside className="sidebar" aria-label="Main navigation">
++        <a className="brand" href="/" aria-label="Voice Companion home"><span className="brand-icon"><AudioLines size={24} /></span><span>voice<span className="brand-light">companion</span><small>A LITTLE MORE CONFIDENCE.</small></span></a>
++        <div className="sidebar-section"><span className="nav-caption">YOUR COMPANION</span><nav>
++          <a className="nav-item selected" href="#conversation" aria-current="page"><MessageSquare size={18} /> Conversation<span className="nav-current" /></a>
++          <a className="nav-item" href="#visit-plan"><ListChecks size={18} /> Visit checklist<ArrowDown size={14} /></a>
++        </nav></div>
++        <div className="sidebar-bottom"><div className="sidebar-note"><span className="sidebar-note-icon"><Languages size={21} /></span><h2>Familiar words.<br />A clearer next step.</h2><p>Type in Telugu or English.<br />Speak naturally in Telugu.</p><span className="sidebar-language" lang="te">మీ మాటే మా మొదటి అడుగు.</span></div>
++          <a className="sidebar-privacy" href="#privacy"><ShieldCheck size={16} /> Your privacy matters<ArrowRight size={14} /></a>
++          <span className="independent-note">Independent guidance.<br />Not a bank or banking service.</span>
+         </div>
+-
+-        <section className="companion-card" aria-label="Telugu voice companion">
+-          <div className="card-topline">
+-            <span className="session-label"><span className="live-dot" /> YOUR VOICE SPACE</span>
+-            <span className="language-pill"><Languages size={16} /><span lang="te">తెలుగు</span><span className="language-english">Telugu</span></span>
++      </aside>
++
++      <div className="workspace">
++        <header className="topbar"><div className="mobile-brand"><AudioLines size={23} /><span>voicecompanion</span></div><div className="breadcrumb"><span className="breadcrumb-icon"><MessageSquare size={15} /></span>Your companion<span>/</span><strong>Conversation</strong></div>
++          <button className="new-conversation" disabled={busy || recording} onClick={() => void newConversation()}><Plus size={17} /><span>New conversation</span></button>
++        </header>
++
++        <main className="main-content">
++          <div className="page-heading"><div><p className="eyebrow"><span /> BANKING, A LITTLE SIMPLER</p><h1>Your next step.<br className="small-break" /> <span>In your own words.</span></h1><p className="page-description">A little guidance for your bank visit. Speak or type — we’re here to help.</p></div><span className="language-pill"><Languages size={16} /><span lang="te">తెలుగు</span><span className="language-divider" /> English text</span></div>
++
++          {setup && <div className="setup-note" role="status"><CircleAlert size={18} /><span lang="te">{setup}</span><button className="icon-button" aria-label="Dismiss setup notice" onClick={() => setSetup('')}><X size={17} /></button></div>}
++
++          <div className="workspace-grid">
++            <section className="conversation-surface" aria-labelledby="conversation-heading" id="conversation">
++              <div className="conversation-heading"><div><span className="conversation-symbol"><MessageSquare size={18} /></span><h2 id="conversation-heading">Let’s talk</h2></div><span className="session-note"><span />{history.length ? 'Conversation in progress' : 'One step at a time'}</span></div>
++
++              {Object.values(details).some(Boolean) && <div className="remembered" aria-label="Remembered details"><span className="remembered-label">REMEMBERED</span>{Object.entries(details).filter(([, value]) => value).map(([key, value]) => <span className="detail-tag" key={key}><strong>{key === 'intent' ? 'Purpose' : key.charAt(0).toUpperCase() + key.slice(1)}:</strong> {key === 'intent' ? ({ open_account: 'ఖాతా తెరవడం', close_account: 'ఖాతా మూసివేయడం', withdraw: 'డబ్బు తీసుకోవడం', deposit: 'డబ్బు జమ చేయడం', transfer: 'డబ్బు బదిలీ చేయడం', balance: 'బ్యాలెన్స్' }[value!] ?? value) : value}</span>)}</div>}
++
++              <Conversation turns={history} disabled={busy || recording} loading={stage === 'transcribing'} loadingText={loadingText} restoring={restoring} onAsk={ask} audioBusy={audioBusy} playing={playing} audioUrl={audioUrl} onListen={() => void playReply()} />
++
++              <div ref={conversationEnd} className="conversation-end" />
++              <div className="composer-dock">
++                {error && <div className="error-note" role="alert"><CircleAlert size={20} /><div><strong>We couldn’t finish that step</strong><p>{error}</p><span>Your conversation is still here. Try again when you’re ready.</span></div><button className="icon-button" onClick={() => setError('')} aria-label="Dismiss error"><X size={17} /></button></div>}
++                {reply && <div className="conversation-actions" aria-label="Suggested follow-ups">{['అది ఏంటి?', 'మళ్ళీ చెప్పు', 'నాకు అది లేదు', 'తర్వాత'].map(text => <button key={text} disabled={busy || recording} onClick={() => ask(text)} lang="te">{text}{text === 'తర్వాత' && <ArrowRight size={14} aria-hidden="true" />}</button>)}</div>}
++                <form className="text-entry" onSubmit={(event) => { event.preventDefault(); ask(typed); }}>
++                  <label htmlFor="message" className="sr-only">Your message in Telugu or English</label>
++                  <textarea ref={composer} id="message" value={typed} onChange={(event) => setTyped(event.target.value)} onKeyDown={(event) => {
++                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); ask(typed); }
++                  }} rows={1} maxLength={2000} disabled={busy || recording} placeholder="మీ ప్రశ్న అడగండి… or type your question" aria-describedby="composer-help" />
++                  <div className="composer-controls"><div className="composer-mode">{recording || stage === 'transcribing' || stage === 'permission' ? <span role="status">{recording ? `Listening · 0:${seconds.toString().padStart(2, '0')} / 0:${MAX_SECONDS}` : status}</span> : <><span><Languages size={14} /> Telugu & English</span><span className="keyboard-hint"><CornerDownLeft size={12} /> Enter to send</span></>}</div><div className="composer-buttons"><button type="button" className={`composer-mic ${recording ? 'is-recording' : ''}`} onClick={toggleRecording} disabled={busy} aria-pressed={recording} aria-label={recording ? 'Stop recording from message composer' : 'Start recording from message composer'}>{recording ? <span className="stop-symbol" aria-hidden="true" /> : <Mic size={19} />}</button><button type="submit" className="send-button" disabled={busy || recording || !typed.trim()} aria-label="Send message"><span>Send</span><Send size={16} /></button></div></div>
++                </form>
++                <p className="composer-help" id="composer-help"><LockKeyhole size={12} /><span>Keep document numbers, OTPs and PINs private.</span><span className="multiline-hint">Shift + Enter for a new line</span></p>
++              </div>
++              <div className="conversation-footnote"><ShieldCheck size={13} /><span>Guidance for your visit. Confirm current requirements with your branch.</span></div>
++            </section>
++
++            <aside className="support-column" aria-label="Voice and visit preparation">
++              <VoiceControl recording={recording} busy={busy} stage={stage} seconds={seconds} level={level} status={status} onToggle={toggleRecording} />
++              <section className="visit-plan" id="visit-plan" aria-labelledby="visit-plan-heading"><div className="support-heading"><span className="plan-icon"><ListChecks size={20} /></span><div><p className="eyebrow">A LITTLE PREPARATION</p><h2 id="visit-plan-heading">Your visit, made clearer.</h2></div></div>
++                {preparation?.checklist.length ? <Checklist preparation={preparation} disabled={busy || recording} onAsk={ask} /> : <div className="plan-empty"><div className="plan-placeholder" aria-hidden="true"><span /><span /><span /></div><p>Your visit checklist will appear here as we learn what you need.</p><span>No need to figure it all out at once.</span></div>}
++              </section>
++              {!!preparation?.reply_sources?.length && <details className="reply-sources"><summary>ఆధారాలు / Reply sources</summary>{preparation.reply_sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a><span>Checked {source.checked_on}</span></p>)}</details>}
++              <details className="privacy-details" id="privacy"><summary><ShieldCheck size={17} /> A private detail can stay private.</summary><p lang="te">పత్రాలు అప్‌లోడ్ చేయవద్దు. ఆధార్/PAN నంబర్లు, OTP, PIN, పాస్‌వర్డ్‌లు చెప్పవద్దు. పత్రం పేరు మాత్రమే చాలు.</p><p>Your details stay in this conversation. Correct them anytime. New conversation clears this session.</p><p>Audio is sent to Gnani for processing. This is preparation guidance, not a guarantee that an account will be opened.</p></details>
++            </aside>
+           </div>
+-
+-          {setup && <div className="setup-note"><CircleAlert size={17} /><span>{setup}</span><button aria-label="Dismiss setup notice" onClick={() => setSetup('')}><X size={16} /></button></div>}
+-          <div className="conversation-tools"><span>{history.length ? `${history.length} turns · I’ll remember your details` : 'Start with what you need help with'}</span><button disabled={busy || recording} onClick={() => void newConversation()}>New conversation</button></div>
+-          {Object.values(details).some(Boolean) && <div className="remembered" aria-label="Remembered details">{Object.entries(details).filter(([, value]) => value).map(([key, value]) => <span key={key}><strong>{key === 'intent' ? 'Purpose' : key.charAt(0).toUpperCase() + key.slice(1)}:</strong> {key === 'intent' ? ({ open_account: 'ఖాతా తెరవడం', close_account: 'ఖాతా మూసివేయడం', withdraw: 'డబ్బు తీసుకోవడం', deposit: 'డబ్బు జమ చేయడం', transfer: 'డబ్బు బదిలీ చేయడం', balance: 'బ్యాలెన్స్' }[value!] ?? value) : value}</span>)}</div>}
+-
+-          <div className="record-area">
+-            <div className={`status ${recording ? 'is-recording' : ''}`} role="status">{busy && <LoaderCircle size={15} className="spin" />}{status}</div>
+-            <div className={`mic-orbit ${recording ? 'recording' : ''}`}>
+-              <button className="record-button" onClick={() => { if (recording) void stopRecording(); else void startRecording(); }} disabled={busy} aria-label={recording ? 'Stop recording' : 'Start recording'}>
+-                {busy ? <LoaderCircle size={38} className="spin" /> : recording ? <Square size={32} fill="currentColor" /> : <Mic size={40} strokeWidth={1.7} />}
+-              </button>
+-            </div>
+-            <h2>{recording ? 'Tap to stop' : busy ? 'One moment…' : 'Tap to speak'}</h2>
+-            <p className="telugu-hint" lang="te">{recording ? 'మాట్లాడండి, నేను వింటున్నాను' : 'మీ మాటల్లో చెప్పండి'}</p>
+-            <div className={`waveform ${recording ? 'active' : ''}`} aria-hidden="true">{Array.from({ length: 27 }, (_, i) => <span key={i} style={{ height: `${recording ? 5 + level * (12 + (Math.sin(i * 1.8) + 1) * 20) : 4 + (Math.sin(i * 1.8) + 1) * 5}px` }} />)}</div>
+-            <span className="record-limit">{recording ? `0:${seconds.toString().padStart(2, '0')} / 0:25` : 'Speak naturally · Up to 25 seconds'}</span>
+-          </div>
+-
+-          {error && <div className="error-note" role="alert"><CircleAlert size={19} /><div><strong>Let’s try that again</strong><p>{error}</p></div></div>}
+-          <form className="text-entry" onSubmit={(event) => { event.preventDefault(); void sendText(); }}><label htmlFor="message">Or type a message / correct a detail</label><div><input id="message" value={typed} onChange={(event) => setTyped(event.target.value)} maxLength={2000} disabled={busy || recording} placeholder="SBI కాదు, HDFC bank" /><button type="submit" disabled={busy || recording || !typed.trim()}>Send</button></div></form>
+-          <p className="privacy-note" lang="te">పత్రాలు అప్‌లోడ్ చేయవద్దు. ఆధార్/PAN నంబర్లు, OTP, PIN, పాస్‌వర్డ్‌లు చెప్పవద్దు. పత్రం పేరు మాత్రమే చాలు.</p>
+-
+-          <div className="conversation">
+-            <section className={`text-panel transcript-panel ${transcript ? 'has-text' : ''}`}>
+-              <div className="panel-label"><span><Mic size={14} /> YOU SAID</span>{transcript && <Check size={15} />}</div>
+-              {transcript ? <p className="telugu-copy" lang="te">{transcript}</p> : <p className="placeholder">Your words will appear here.<br /><span>Telugu, with a little English? That’s okay.</span></p>}
+-            </section>
+-            <section className={`text-panel reply-panel ${reply ? 'has-text' : ''}`}>
+-              <div className="panel-label"><span><AudioLines size={15} /> COMPANION’S REPLY</span><span className="reply-tag">TELUGU</span></div>
+-              {reply ? <p className="telugu-copy" lang="te">{reply}</p> : <p className="placeholder">A reply, in a familiar voice.<br /><span>Record a message to begin.</span></p>}
+-              <button className="listen-button" onClick={() => void playReply()} disabled={!reply || stage !== 'idle' || audioBusy} aria-label={audioBusy ? 'Preparing reply audio' : playing ? 'Stop reply playback' : audioUrl ? 'Listen to reply' : 'Retry generating reply audio'}>
+-                {audioBusy ? <LoaderCircle size={18} className="spin" /> : playing ? <Square size={16} /> : <Volume2 size={18} />} {audioBusy ? 'Preparing reply audio…' : playing ? 'Stop playback' : audioUrl ? 'Listen to reply' : reply && stage === 'idle' ? 'Retry reply audio' : 'Listen to reply'}
+-              </button>
+-            </section>
+-          </div>
+-
+-          {reply && <div className="conversation-actions">{['అది ఏంటి?', 'మళ్ళీ చెప్పు', 'నాకు అది లేదు', 'తర్వాత'].map(text => <button key={text} disabled={busy || recording} onClick={() => void sendText(text)} lang="te">{text}</button>)}</div>}
+-          {!!preparation?.reply_sources?.length && <details className="conversation-history"><summary>ఈ సమాధానానికి ఆధారాలు / Reply sources</summary>{preparation.reply_sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a> · Checked {source.checked_on}</p>)}</details>}
+-          <Checklist preparation={preparation} disabled={busy || recording} onAsk={text => void sendText(text)} />
+-          {history.length > 1 && <section className="conversation-history" aria-label="Conversation history"><h3>ముందు మాట్లాడినవి / Earlier messages</h3>{history.slice(0, -1).map((turn) => <div key={turn.turn_id}><p lang="te"><strong>You:</strong> {turn.transcript}</p><p lang="te"><strong>Companion:</strong> {turn.reply}</p></div>)}</section>}
+-
+-          <div className="card-footer"><ShieldCheck size={16} /><span>Audio is sent to Gnani to process your voice.</span></div>
+-        </section>
+-
+-        <aside className="try-note"><span className="try-icon"><Headphones size={19} /></span><div><strong>Not sure what to say?</strong><p>Try <span lang="te">“నాకు bank account తెరవాలి”</span> <span className="translation">— I’d like to open a bank account.</span></p></div><ArrowUpRight className="try-arrow" size={19} /></aside>
+-        <p className="phase-note">One small conversation. One step forward.<span>Your details stay in this conversation. Correct them anytime; New conversation clears them.</span></p>
+-      </main>
+-
+-      <footer className="page-footer"><span>MADE FOR EVERYDAY CONVERSATIONS</span><span>Telugu now <span className="footer-dot">·</span> Tamil, Hindi & Kannada next</span></footer>
++          <footer className="page-footer"><span>HUMAN WORDS. A LITTLE MORE CONFIDENCE.</span><span>Made for everyday conversations <span>·</span> Telugu voice + text</span></footer>
++        </main>
++      </div>
++
+       <audio ref={audio} src={audioUrl || undefined}
+         onCanPlay={() => console.info(`[voice-audio] request_id=${activeAudioUrlRequestId.current} stage=can_play source=${audio.current?.currentSrc.startsWith('blob:') ? 'blob' : 'other'}`)}
+         onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+--- src/Checklist.tsx (before)
++++ src/Checklist.tsx
+@@ -1,4 +1,4 @@
+-import { Volume2 } from 'lucide-react';
++import { ArrowUpRight, BookOpen, Volume2 } from 'lucide-react';
+ 
+ type Source = { title: string; url: string; checked_on: string; published_or_updated: string | null; effective_date: string | null };
+ type Item = { id: string; title: string; kind: string; text: string; status: string; conditions: string; exceptions: string; category: string; branch_confirmation: boolean; sources: Source[] };
+@@ -8,17 +8,18 @@
+ export function Checklist({ preparation, disabled, onAsk }: { preparation?: Preparation; disabled: boolean; onAsk: (text: string) => void }) {
+   if (!preparation?.checklist.length) return null;
+   return <section className="preparation" aria-label="Bank visit checklist">
+-    <h2 lang="te">బ్యాంకుకు వెళ్లే ముందు</h2>
+-    <p lang="te">{preparation.notice}</p>
++    <h3 className="checklist-title" lang="te">బ్యాంకుకు వెళ్లే ముందు</h3>
++    <p className="checklist-notice" lang="te">{preparation.notice}</p>
+     <p className="coverage">{preparation.coverage}</p>
+-    <div className="checklist-items">{preparation.checklist.map(item => <article key={item.id}>
++    <div className="checklist-items">{preparation.checklist.map((item, index) => <article key={item.id} className={preparation.focus.replace('_missing', '') === item.id ? 'current-item' : ''}>
++      <div className="checklist-item-top"><span className="item-number">{String(index + 1).padStart(2, '0')}</span>{preparation.focus.replace('_missing', '') === item.id && <span className="current-item-label">Discussing now</span>}</div>
+       <span className="item-kind" lang="te">{kinds[item.kind]}{item.status === 'unverified' ? ' · ఇంకా ధృవీకరించలేదు' : item.status === 'needs_confirmation' ? ' · తాజా విధానం నిర్ధారించాలి' : ''}</span>
+-      <h3 lang="te">{item.title}</h3><p lang="te">{item.text}</p>
++      <h4 lang="te">{item.title}</h4><p lang="te">{item.text}</p>
+       <button disabled={disabled} onClick={() => onAsk(({identity: 'గుర్తింపు పత్రం అంటే ఏంటి?', tax: 'PAN అంటే ఏంటి?', address: 'చిరునామా గురించి చెప్పు', existing: 'ఇప్పటికే KYC గురించి చెప్పు', small: 'ఏ పత్రమూ లేదు', visit: 'కాపీలు ఎన్ని?'} as Record<string,string>)[item.id] ?? 'తర్వాత')}><Volume2 size={19} aria-hidden="true" /> వివరించు / Explain</button>
+-      <details><summary>ఆధారాలు / Official sources</summary>
++      <details className="item-sources"><summary><BookOpen size={14} /> ఆధారాలు / Official sources</summary>
+         <p>{item.category}</p><p>Conditions: {item.conditions}</p><p>Exceptions: {item.exceptions}</p>
+         {item.branch_confirmation && <p lang="te">మీ పరిస్థితికి వర్తించే విధానాన్ని బ్రాంచ్‌తో నిర్ధారించండి.</p>}
+-        {item.sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a><br />Checked: {source.checked_on} · Published/updated: {source.published_or_updated ?? 'Not stated'} · Effective date: {source.effective_date ?? 'Not stated'}</p>)}
++        {item.sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}<ArrowUpRight size={13} aria-hidden="true" /></a><br />Checked: {source.checked_on} · Published/updated: {source.published_or_updated ?? 'Not stated'} · Effective date: {source.effective_date ?? 'Not stated'}</p>)}
+       </details>
+     </article>)}</div>
+     <details className="document-sample"><summary>పత్రం ఎలా ఉంటుంది? / Illustrative sample</summary>
+--- src/styles.css (before)
++++ src/styles.css
+@@ -1,37 +1,463 @@
+ @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;450;500;550;600;650;700&family=Noto+Sans+Telugu:wght@400;500;600&display=swap');
+ 
+-:root{font-family:'DM Sans',system-ui,sans-serif;color:#213c34;background:#f6f8f6;font-synthesis:none;font-weight:400;-webkit-font-smoothing:antialiased;font-optical-sizing:auto}
+-*{box-sizing:border-box}body{margin:0}button,a{-webkit-tap-highlight-color:transparent}button{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed}button:focus-visible,a:focus-visible{outline:3px solid #c48738;outline-offset:5px}button{touch-action:manipulation}a{color:inherit;text-decoration:none}.app-shell{max-width:1200px;margin:0 auto;padding:0 48px}.topbar{height:102px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e2e8e2}.brand{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:700;letter-spacing:-.9px}.brand-light{font-weight:450}.brand-icon{display:grid;place-items:center;width:38px;height:38px;background:#235c47;color:#fff;border-radius:12px}.phase-badge{display:flex;align-items:center;gap:9px;font-size:10px;font-weight:650;letter-spacing:1.3px;color:#6d7e74}.phase-badge>span:first-child{width:6px;height:6px;background:#73967d;border-radius:50%}.badge-divider{color:#bfc8bf;padding:0 3px}main{max-width:680px;margin:0 auto}.intro{text-align:center;padding:48px 0 29px}.eyebrow{font-size:10px;font-weight:700;letter-spacing:2px;color:#65806b;margin-bottom:16px}h1{font-size:34px;font-weight:550;line-height:1.25;letter-spacing:-1.4px;margin:0 0 14px}.intro>p{font-size:14px;line-height:1.8;color:#778278;margin:0}.mobile-break{display:none}.companion-card{background:#fff;border:1px solid #dee5dd;border-radius:22px;box-shadow:0 7px 28px #314b3410;overflow:hidden}.card-topline{display:flex;align-items:center;justify-content:space-between;padding:20px 25px}.session-label{display:flex;align-items:center;gap:8px;font-size:10px;font-weight:650;letter-spacing:1.3px;color:#748577}.live-dot{background:#769b70;width:6px;height:6px;border-radius:50%}.language-pill{display:flex;align-items:center;gap:7px;background:#f7f8f4;border:1px solid #e7eadd;padding:8px 10px;border-radius:8px;color:#536b53;font-size:12px}.language-pill [lang=te]{font-family:'Noto Sans Telugu',sans-serif;font-size:12px}.language-english{font-size:11px;color:#83907d;margin-left:1px}.record-area{display:flex;flex-direction:column;align-items:center;padding:14px 20px 27px}.status{font-size:12px;color:#839082;display:flex;align-items:center;gap:6px;min-height:18px}.status.is-recording{color:#b34f3d}.mic-orbit{margin:24px 0 20px;width:142px;height:142px;border:1px solid #eaf0e8;border-radius:50%;display:grid;place-items:center;background:#f7faf5;box-shadow:0 0 0 10px #fcfdfb}.record-button{width:114px;height:114px;border:0;border-radius:50%;background:#245f49;color:#fff;display:grid;place-items:center;box-shadow:0 5px 13px #235b4526;transition:background .2s,transform .2s}.record-button:hover:enabled{background:#174c39;transform:scale(1.03)}.record-button:disabled{background:#758e7d}.recording .record-button{background:#ae5343}.recording{box-shadow:0 0 0 10px #fdf5f1;animation:breathe 1.8s infinite}.record-area h2{font-size:18px;font-weight:550;letter-spacing:-.3px;margin:0 0 6px}.telugu-hint{font-family:'Noto Sans Telugu',sans-serif;font-size:13px;color:#859181;margin:0;line-height:1.8}.waveform{height:32px;display:flex;align-items:center;justify-content:center;gap:3px;margin:17px 0 6px}.waveform span{display:block;width:3px;max-height:32px;background:#cbdac4;border-radius:5px;transition:height .1s}.waveform.active span{background:#819a68}.record-limit{font-size:10px;color:#8a9487;letter-spacing:.2px;font-variant-numeric:tabular-nums}.conversation{padding:0 24px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}.text-panel{border:1px solid #e7eae3;border-radius:11px;padding:17px 17px 15px;min-width:0;min-height:176px}.transcript-panel{background:#fafbf9}.reply-panel{background:#f1f5ee;border-color:#e4ebdf}.panel-label{display:flex;align-items:center;justify-content:space-between;font-size:9px;color:#7d8979;font-weight:650;letter-spacing:1px;gap:6px}.panel-label>span:first-child{display:flex;align-items:center;gap:6px}.reply-panel .panel-label{color:#607459}.reply-tag{font-size:8px;letter-spacing:.7px;background:#e6eddf;border-radius:4px;padding:4px 5px}.placeholder{font-size:12px;line-height:1.85;color:#899183;margin:18px 0 10px}.placeholder span{font-size:10px;color:#9aa293}.telugu-copy{font-family:'Noto Sans Telugu',sans-serif;font-size:17px;line-height:1.9;overflow-wrap:anywhere;margin:16px 0 10px}.listen-button{display:flex;align-items:center;gap:7px;background:#fff;border:1px solid #d9e3d2;color:#44673b;border-radius:7px;padding:8px 10px;min-height:36px;font-size:10px;font-weight:550}.listen-button:hover:enabled{background:#e8f0e1}.listen-button:disabled{color:#a3af99;background:#ffffff80;border-color:#e1e8da}.card-footer{display:flex;align-items:center;justify-content:center;gap:7px;padding:13px;background:#fcfdfb;border-top:1px solid #edf0e9;color:#8c9785;font-size:10px}.try-note{display:flex;align-items:center;gap:13px;padding:20px 14px;color:#73816b}.try-icon{width:36px;height:36px;flex-shrink:0;display:grid;place-items:center;border:1px solid #dfe6d9;border-radius:50%}.try-note strong{font-size:11px;font-weight:550;color:#697962}.try-note p{font-size:11px;line-height:1.8;margin:3px 0 0}.try-note [lang=te]{font-family:'Noto Sans Telugu',sans-serif;color:#5d7352}.translation{color:#919b89;font-size:10px}.try-arrow{margin-left:auto;flex-shrink:0;color:#9baa91}.phase-note{font-size:12px;text-align:center;color:#697e60;margin:9px 0 35px}.phase-note span{display:block;font-size:10px;color:#9aa390;margin-top:8px;line-height:1.7}.page-footer{display:flex;justify-content:space-between;gap:16px;border-top:1px solid #e2e8df;padding:22px 0 28px;color:#95a08c;font-size:10px}.page-footer>span:first-child{font-size:8px;letter-spacing:1.5px;font-weight:600}.footer-dot{padding:0 7px}.setup-note,.error-note{margin:0 24px 10px;padding:12px;background:#fcf8ec;border:1px solid #ece1c6;border-radius:8px;display:flex;align-items:flex-start;gap:8px;color:#89733e;font-size:11px;line-height:1.7}.setup-note>svg,.error-note>svg{flex-shrink:0;margin-top:2px}.setup-note button{border:0;background:none;color:inherit;margin-left:auto;display:grid;place-items:center;min-width:24px;min-height:24px}.error-note{background:#fcf2ee;border-color:#eed8cf;color:#934c3d;margin-bottom:20px;font-size:12px}.error-note strong{font-weight:600}.error-note p{margin:3px 0 0}.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@keyframes breathe{50%{box-shadow:0 0 0 15px #fdf5f1}}
+-@media(min-width:1400px){.intro{padding-top:62px}.record-area{padding-top:22px;padding-bottom:32px}.mic-orbit{margin-top:27px;margin-bottom:23px}.page-footer{margin-top:25px}}
+-@media(max-width:650px){.app-shell{padding:0 20px}.topbar{height:78px}.brand{font-size:19px}.brand-icon{width:33px;height:33px;border-radius:10px}.phase-badge{font-size:8px;letter-spacing:.7px}.phase-badge .badge-divider,.phase-badge{gap:5px}.intro{padding:33px 0 25px}.eyebrow{font-size:8px;letter-spacing:1.6px;margin-bottom:14px}h1{font-size:29px;letter-spacing:-1px;line-height:1.3}.mobile-break{display:block}.intro>p{font-size:12px}.desktop-break{display:none}.companion-card{border-radius:18px}.card-topline{padding:17px 17px 13px}.session-label{font-size:8px;letter-spacing:1px}.language-pill{padding:7px 8px}.language-english{display:none}.record-area{padding-top:12px;padding-bottom:23px}.conversation{grid-template-columns:1fr;padding:0 16px 16px;gap:10px}.text-panel{min-height:115px;padding:15px}.reply-panel{min-height:160px}.placeholder{font-size:13px;margin:14px 0 5px}.placeholder span{font-size:11px}.panel-label{font-size:9px}.listen-button{font-size:12px;min-height:44px;padding:9px 12px;margin-top:15px}.telugu-copy{font-size:18px}.card-footer{padding:13px 8px;font-size:9px}.try-note{padding:18px 2px;gap:10px}.try-note p{font-size:11px}.translation{display:block;font-size:10px}.try-arrow{display:none}.phase-note{font-size:11px;margin:5px 0 24px}.phase-note span{font-size:9px;padding:0 10px}.page-footer{flex-direction:column;align-items:center;gap:10px;padding:21px 0}.setup-note,.error-note{margin-left:16px;margin-right:16px}.setup-note{font-size:10px}.mic-orbit{margin-top:20px}.record-limit{font-size:11px}}
+-@media(max-width:370px){.app-shell{padding:0 12px}.brand{font-size:17px}.phase-badge{font-size:7px}h1{font-size:27px}.language-pill{gap:5px}.session-label{font-size:7px}}
+-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+-.conversation-tools { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:0 24px 12px; font-size:11px; color:#5c705f; }
+-.conversation-tools button { background:none; color:#245f49; border:1px solid #dce5d8; border-radius:7px; padding:8px; min-height:40px; }
+-.remembered { display:flex; gap:7px; flex-wrap:wrap; padding:0 24px 14px; font-size:12px; line-height:1.8; }
+-.remembered span { background:#f1f5ee; border-radius:6px; padding:4px 8px; overflow-wrap:anywhere; }
+-.remembered strong { text-transform:capitalize; }
+-.text-entry { padding:0 24px 20px; }
+-.text-entry label { display:block; font-size:12px; margin-bottom:8px; color:#596f5b; }
+-.text-entry>div { display:flex; gap:8px; }
+-.text-entry input { min-width:0; flex:1; font:inherit; font-size:14px; padding:10px; border:1px solid #d4dfcf; border-radius:8px; }
+-.text-entry button { border:0; background:#245f49; color:white; border-radius:8px; padding:10px 16px; min-height:44px; }
+-.text-entry button:disabled { opacity:.5; }
+-.conversation-history { padding:0 24px 20px; font-size:13px; line-height:1.9; overflow-wrap:anywhere; }
+-.conversation-history summary { cursor:pointer; color:#245f49; padding:8px 0; }
+-.conversation-history>div { border-top:1px solid #e5eadd; }
+-.privacy-note { padding:0 24px; font-size:15px; line-height:1.9; color:#475b4c; }
+-.conversation-actions { display:flex; flex-wrap:wrap; gap:8px; padding:20px 24px; }
+-.conversation-actions button,.preparation button { min-height:48px; padding:10px 14px; border:1px solid #9bb8aa; border-radius:10px; background:#fff; color:#245f49; font:inherit; font-size:16px; cursor:pointer; display:inline-flex; align-items:center; gap:8px; }
+-.conversation-actions button:disabled,.preparation button:disabled { opacity:.5; cursor:default; }
+-.preparation { margin:8px 24px 28px; padding:20px; border:1px solid #c9daca; background:#f7faf4; border-radius:16px; font-size:17px; line-height:1.9; overflow-wrap:anywhere; }
+-.preparation h2 { font-size:24px; }.preparation h3 { font-size:19px; margin:8px 0; }
+-.preparation .coverage { font-size:13px; color:#526353; }
+-.checklist-items article { border-top:1px solid #cedccd; padding:18px 0; }
+-.item-kind { font-size:14px; color:#526353; }.preparation summary { cursor:pointer; padding:12px 0; min-height:48px; }
+-.preparation details { font-size:15px; }.preparation a { color:#195d44; text-decoration:underline; }
+-.sample-paper { border:2px dashed #99896a; padding:18px; background:#fff9e8; }.sample-paper strong { color:#8a341b; }
+-.conversation-history { font-size:16px; }
+-button:focus-visible,summary:focus-visible,a:focus-visible { outline:3px solid #a75a16; outline-offset:3px; }
+-@media(max-width:650px) { .preparation { margin:8px 16px 20px; padding:14px; }.conversation-actions { padding:16px; } }
+-@media(max-width:650px) { .conversation-tools,.remembered { padding-left:16px; padding-right:16px; } .text-entry,.conversation-history { padding-left:16px; padding-right:16px; } }
++:root {
++  font-family: 'DM Sans', 'Noto Sans Telugu', system-ui, sans-serif;
++  color: #292634;
++  background: #f7f7fb;
++  font-synthesis: none;
++  font-weight: 400;
++  -webkit-font-smoothing: antialiased;
++  font-optical-sizing: auto;
++  --ink: #292634;
++  --muted: #706c7e;
++  --line: #e9e7ef;
++  --accent: #6351bb;
++  --accent-dark: #4e3d9e;
++  --gradient: linear-gradient(130deg, #7361c9, #5140a1 70%, #70519e);
++}
++* { box-sizing: border-box; }
++html { scroll-behavior: smooth; scroll-padding-top: 24px; }
++body { margin: 0; min-width: 320px; }
++button, textarea, input { font: inherit; }
++button, a, summary { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
++button, summary { cursor: pointer; }
++button { transition: background .18s, border-color .18s, box-shadow .18s, transform .18s; }
++button:disabled { cursor: not-allowed; }
++a { color: inherit; text-decoration: none; }
++button:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 3px solid #9a79df; outline-offset: 4px; }
++svg { flex-shrink: 0; }
++p, h1, h2, h3, h4 { margin-top: 0; }
++button:disabled { opacity: .48; }
++[lang='te'] { font-family: 'Noto Sans Telugu', sans-serif; line-height: 1.95; }
++.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
++.skip-link { position: fixed; left: 12px; top: -100px; padding: 14px; background: white; color: var(--accent-dark); z-index: 100; box-shadow: 0 4px 20px #211c3420; }
++.skip-link:focus { top: 12px; }
++.app-shell { display: grid; grid-template-columns: 218px minmax(0, 1fr); min-height: 100dvh; }
++.sidebar { position: sticky; top: 0; height: 100dvh; padding: 32px 20px 24px; background: #1c1b25; color: #d4d0df; display: flex; flex-direction: column; }
++.brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 650; letter-spacing: -.7px; color: #faf9ff; }
++.brand-icon { display: grid; place-items: center; width: 37px; height: 40px; border: 1px solid #ffffff26; border-radius: 11px; background: linear-gradient(145deg, #8c75ce, #63529c); box-shadow: inset 0 1px #ffffff2b; }
++.brand-light { font-weight: 400; }
++.brand small { display: block; font-size: 6.5px; letter-spacing: 1.8px; font-weight: 500; color: #b9b0c9; margin-top: 6px; }
++.sidebar-section { margin-top: 57px; }
++.nav-caption { display: block; font-size: 9px; letter-spacing: 1.8px; font-weight: 600; color: #9892a6; margin: 0 13px 15px; }
++.nav-item { display: flex; align-items: center; gap: 11px; min-height: 48px; padding: 12px; font-size: 12px; border-radius: 8px; margin-bottom: 7px; color: #b1aabd; transition: background .18s, color .18s; }
++.nav-item.selected { background: linear-gradient(110deg, #71608a3b, #63527d24); border: 1px solid #c2abe623; color: #efe8ff; }
++.nav-item:hover { background-color: #ffffff0b; color: #fff; }
++.nav-item > svg:last-child:not(:first-child), .nav-current { margin-left: auto; }
++.nav-current { width: 5px; height: 5px; background: #b69bff; border-radius: 50%; }
++.sidebar-bottom { margin-top: auto; padding: 46px 11px 0; }
++.sidebar-note-icon { color: #b3a1d8; display: block; margin-bottom: 18px; }
++.sidebar-note h2 { font-size: 17px; color: #e7e0f2; font-weight: 450; letter-spacing: -.3px; line-height: 1.6; margin-bottom: 12px; }
++.sidebar-note p { color: #b1a7c0; font-size: 11px; line-height: 1.9; margin-bottom: 16px; }
++.sidebar-language { font-size: 10px; color: #c4b8d6; }
++.sidebar-privacy { display: flex; align-items: center; gap: 7px; border-top: 1px solid #ffffff12; margin-top: 28px; padding-top: 23px; font-size: 10px; color: #bcb3cb; }
++.sidebar-privacy > svg:last-child { margin-left: auto; }
++.independent-note { display: block; color: #a69caf; font-size: 10px; line-height: 1.8; margin-top: 17px; }
++.workspace { min-width: 0; }
++.topbar { min-height: 83px; padding: 20px 37px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; background: #ffffff85; }
++.breadcrumb { display: flex; align-items: center; gap: 12px; color: #777181; font-size: 11px; }
++.breadcrumb strong { font-weight: 500; color: #4b4557; }
++.breadcrumb > span:not(.breadcrumb-icon) { color: #cbc5d3; }
++.breadcrumb-icon { display: grid; place-items: center; border: 1px solid var(--line); width: 29px; height: 29px; border-radius: 7px; background: white; color: #827493; }
++.new-conversation { min-height: 41px; border: 1px solid #ddd9e8; background: #fff; color: #575061; display: flex; align-items: center; gap: 7px; border-radius: 7px; padding: 9px 12px; font-size: 11px; box-shadow: 0 2px 3px #20133403; }
++.new-conversation:hover:enabled { background: #f0edf9; border-color: #a99acc; }
++.mobile-brand, .small-break { display: none; }
++.main-content { max-width: 1530px; margin: auto; padding: 31px 36px 0; }
++.page-heading { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin-bottom: 27px; }
++.eyebrow { font-size: 9px; font-weight: 650; letter-spacing: 1.6px; line-height: 1.5; color: #857d94; margin-bottom: 10px; }
++.page-heading .eyebrow { display: flex; align-items: center; gap: 7px; }
++.page-heading .eyebrow > span { width: 5px; height: 5px; border-radius: 50%; background: #9483ba; }
++h1 { font-size: clamp(27px, 2.35vw, 39px); font-weight: 500; letter-spacing: -1.4px; line-height: 1.35; margin: 0 0 9px; }
++h1 > span { color: #7961aa; background: linear-gradient(95deg, #6856ae, #a6729b); background-clip: text; -webkit-text-fill-color: transparent; }
++.page-description { color: var(--muted); font-size: 12px; line-height: 1.9; margin-bottom: 0; }
++.language-pill { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; padding: 7px 11px; background: #f1eef7; border: 1px solid #e6e0ef; border-radius: 6px; font-size: 10px; color: #6f5d85; }
++.language-pill [lang='te'] { font-size: 11px; }
++.language-divider { height: 12px; width: 1px; background: #d9cfe4; }
++.workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) 302px; gap: 24px; align-items: start; }
++.conversation-surface { min-width: 0; border: 1px solid #e4e0eb; border-radius: 13px; background: #fff; box-shadow: 0 6px 24px #28213a04; scroll-margin-top: 20px; }
++.conversation-heading { padding: 17px 24px; border-bottom: 1px solid #eeeaf3; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
++.conversation-heading > div { display: flex; align-items: center; gap: 10px; }
++.conversation-heading h2 { font-size: 13px; font-weight: 600; letter-spacing: -.2px; margin: 0; }
++.conversation-symbol { color: #8a7aab; display: flex; }
++.session-note { display: flex; align-items: center; gap: 6px; font-size: 9px; color: #7f788b; }
++.session-note > span { width: 4px; height: 4px; border-radius: 50%; background: #a194b3; }
++.conversation-empty { padding: 39px 28px 35px; text-align: center; }
++.welcome-mark { display: inline-grid; place-items: center; width: 65px; height: 65px; border: 1px solid #ece5f5; border-radius: 20px; color: #8262b6; background: linear-gradient(135deg, #f7f4fc, #eeebf8); box-shadow: 0 5px 18px #77609a09, inset 0 1px #fff; transform: rotate(-6deg); margin: 0 0 25px; }
++.welcome-mark svg { transform: rotate(6deg); }
++.conversation-empty .eyebrow { font-size: 8px; letter-spacing: 1.6px; margin-bottom: 13px; }
++.conversation-empty h2 { font-size: clamp(24px, 2vw, 31px); font-weight: 450; letter-spacing: -.85px; line-height: 1.45; margin-bottom: 13px; }
++.empty-description { color: #81798c; font-size: 12px; line-height: 1.85; margin-bottom: 14px; }
++.empty-telugu { font-size: 12px; color: #746187; margin-bottom: 26px; }
++.starter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; max-width: 530px; margin: 0 auto; }
++.starter { min-width: 0; display: flex; align-items: flex-start; gap: 10px; text-align: left; border: 1px solid #e7e2ee; background: #fdfcfe; border-radius: 8px; padding: 15px 12px; color: #8a76a3; }
++.starter > span { min-width: 0; flex: 1; }
++.starter strong { font-size: 11px; font-weight: 550; color: #53465f; display: block; line-height: 1.5; }
++.starter small { font-size: 9px; color: #84778d; display: block; margin-top: 5px; line-height: 1.6; }
++.starter > svg:first-child { margin-top: 2px; }
++.starter > svg:last-child { width: 13px; margin-top: 2px; }
++.starter:hover:enabled { border-color: #baa5d1; background: #f5f0fa; transform: translateY(-2px); }
++.remembered { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 14px 24px 0; }
++.remembered-label { font-size: 8px; font-weight: 600; letter-spacing: 1px; color: #8b7c9b; margin-right: 2px; }
++.detail-tag { font-size: 11px; background: #f5f2fa; padding: 4px 8px; border-radius: 4px; line-height: 1.9; color: #6e5a80; overflow-wrap: anywhere; }
++.detail-tag strong { font-weight: 500; }
++.message-list { padding: 25px 26px 8px; }
++.conversation-beginning { display: flex; align-items: center; justify-content: center; gap: 12px; color: #9b92a6; font-size: 8px; letter-spacing: 1.4px; margin: 0 0 26px; }
++.conversation-beginning > span { height: 1px; background: #eeebf3; width: 40px; }
++.message-turn { margin-bottom: 28px; animation: message-in .25s ease-out; }
++.message { min-width: 0; }
++.message-user { width: fit-content; max-width: 90%; background: #eee9f8; color: #4b3d61; padding: 12px 17px; border-radius: 12px 12px 3px 12px; margin-left: auto; margin-bottom: 24px; }
++.message-meta { display: flex; align-items: center; gap: 7px; font-size: 8px; font-weight: 600; letter-spacing: 1px; color: #877294; margin-bottom: 7px; line-height: 1.6; }
++.message-meta > span { font-weight: 400; color: #8e8599; font-size: 9px; letter-spacing: 0; margin-left: 2px; }
++.message-user .message-meta { justify-content: flex-end; color: #8c779c; }
++.message-copy { font-size: 16px; line-height: 2; margin-bottom: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
++.message-assistant { display: flex; align-items: flex-start; gap: 12px; padding-right: 10px; }
++.assistant-avatar { flex-shrink: 0; display: inline-grid; place-items: center; width: 31px; height: 33px; border-radius: 9px; background: linear-gradient(145deg, #eee8f8, #e6e1f5); color: #8064aa; border: 1px solid #e3d9ee; }
++.assistant-body { min-width: 0; flex: 1; padding-top: 3px; }
++.assistant-body .message-copy { color: #4a4355; }
++.listen-button { min-height: 40px; display: inline-flex; align-items: center; gap: 7px; font-size: 10px; padding: 8px 10px; border: 1px solid #e7e0ee; color: #7b608e; background: #fbf9fd; border-radius: 6px; margin-top: 12px; }
++.listen-button:hover:enabled, .listen-button.is-playing { background: #f0e9f7; border-color: #b7a2cd; }
++.playback-indicator { height: 12px; display: flex; align-items: center; gap: 2px; margin-left: 4px; }
++.playback-indicator i { width: 2px; height: 6px; background: #8d6bad; animation: audio-bars .8s ease-in-out infinite alternate; }
++.playback-indicator i:nth-child(2) { height: 12px; animation-delay: .2s; }
++.playback-indicator i:nth-child(3) { animation-delay: .4s; }
++.inline-status, .message-loading { display: flex; justify-content: center; align-items: center; gap: 9px; color: #776584; font-size: 12px; line-height: 1.8; }
++.inline-status { margin: 20px 0 0; }
++.message-loading { justify-content: flex-start; margin-bottom: 18px; }
++.conversation-end { scroll-margin-bottom: 200px; }
++.composer-dock { position: sticky; bottom: 0; background: #fff; z-index: 3; padding: 14px 23px 16px; border-radius: 0 0 13px 13px; }
++.conversation-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
++.conversation-actions button { min-height: 42px; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 1.9; padding: 6px 10px; border: 1px solid #e8e2f0; border-radius: 6px; background: #fff; color: #77618c; }
++.conversation-actions button:hover:enabled { background: #f3edf9; border-color: #bda9d1; }
++.text-entry { border: 1px solid #d8cfe5; border-radius: 10px; padding: 13px 13px 10px; background: #fff; box-shadow: 0 3px 12px #74608d05; transition: border-color .2s, box-shadow .2s; }
++.text-entry:focus-within { border-color: #9474be; box-shadow: 0 0 0 3px #ad8bd51c; }
++.text-entry textarea { display: block; resize: none; width: 100%; min-width: 0; min-height: 43px; max-height: 160px; padding: 2px 1px 9px; border: 0; background: transparent; color: #494052; font-size: 15px; line-height: 1.9; outline: none; }
++.text-entry textarea::placeholder { color: #97909f; font-size: 13px; }
++.composer-controls { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
++.composer-mode { display: flex; gap: 12px; flex-wrap: wrap; padding-bottom: 9px; color: #92849f; font-size: 9px; line-height: 1.7; }
++.composer-mode > span { display: flex; align-items: center; gap: 5px; }
++.composer-mode .keyboard-hint { color: #9b91a4; font-size: 8px; }
++.composer-buttons { display: flex; align-items: center; gap: 8px; }
++.composer-mic { min-height: 44px; min-width: 44px; display: grid; place-items: center; color: #8c759f; border: 0; background: transparent; border-radius: 6px; }
++.composer-mic:hover { background: #f4eff9; }
++.composer-mic.is-recording { color: #8f4268; background: #f9e8f0; }
++.stop-symbol { width: 13px; height: 13px; border-radius: 2px; background: currentColor; }
++.send-button { min-height: 42px; display: inline-flex; align-items: center; gap: 8px; padding: 10px 15px; border: 1px solid #7660b4; background: var(--gradient); color: white; border-radius: 7px; font-size: 11px; box-shadow: 0 2px 5px #5e417821; }
++.send-button:disabled { opacity: 1; background: #ede8f4; border-color: #e4dced; color: #9988ad; box-shadow: none; }
++.send-button:hover:enabled { box-shadow: 0 3px 12px #674b9d36; filter: brightness(1.06); transform: translateY(-1px); }
++.composer-help { display: flex; align-items: flex-start; justify-content: center; gap: 5px; color: #8a8193; font-size: 8px; line-height: 1.8; margin: 10px 0 0; }
++.composer-help svg { margin-top: 1px; }
++.multiline-hint { margin-left: auto; }
++.conversation-footnote { border-top: 1px solid #eeebf3; padding: 12px; display: flex; align-items: flex-start; justify-content: center; gap: 6px; font-size: 8px; line-height: 1.7; color: #968aa1; }
++.conversation-footnote svg { margin-top: 1px; }
++.support-column { min-width: 0; display: flex; flex-direction: column; gap: 21px; }
++.voice-card { min-width: 0; color: #f5efff; background: radial-gradient(ellipse at 50% 38%, #69548470 0, transparent 63%), linear-gradient(145deg, #2e283e, #2d273f 58%, #39304c); border: 1px solid #493b5a; border-radius: 13px; overflow: hidden; box-shadow: 0 6px 20px #2920360c; scroll-margin-top: 20px; }
++.voice-topline { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 18px 18px 0; }
++.voice-topline > span:first-child { display: flex; align-items: center; gap: 6px; font-size: 8px; color: #c4b7d5; letter-spacing: 1.2px; }
++.voice-language { display: flex; align-items: center; gap: 5px; color: #cbbada; font-size: 9px; }
++.voice-interaction { text-align: center; padding: 31px 15px 0; }
++.mic-orbit { width: 137px; height: 137px; display: grid; place-items: center; border: 1px solid #c2a5e51b; border-radius: 50%; background: radial-gradient(circle, #bd88f320, #b78cde05 70%); box-shadow: 0 0 0 10px #c294ed04; margin: 0 auto 25px; }
++.record-button { border: 1px solid #e8d2fa70; display: grid; place-items: center; width: 103px; height: 103px; border-radius: 50%; color: #fff; background: linear-gradient(140deg, #b69ad4, #9674bc 45%, #745c9d); box-shadow: 0 7px 26px #130c2759, inset 0 1px 4px #fff5; }
++.record-button:hover:enabled { transform: scale(1.035); border-color: #f0dfff; box-shadow: 0 7px 35px #bc8ff04d, inset 0 1px 4px #fff5; }
++.record-button:disabled { opacity: .75; }
++.voice-description h2 { font-size: 16px; font-weight: 450; letter-spacing: -.35px; margin-bottom: 9px; }
++.voice-description p { font-size: 12px; color: #c6b3d7; margin-bottom: 4px; }
++.voice-instruction { color: #b5a5c8; font-size: 9px; line-height: 1.9; }
++.voice-feedback { text-align: center; padding: 17px 15px 22px; }
++.waveform { display: flex; align-items: center; justify-content: center; gap: 3px; height: 30px; margin: 0 0 9px; }
++.waveform span { flex-shrink: 1; width: 3px; max-height: 30px; background: #c5abd0; border-radius: 3px; transition: height .1s; opacity: .55; }
++.waveform.active span { background: #e9c4f3; opacity: 1; }
++.voice-status { display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 10px; line-height: 1.6; color: #d4c2df; margin: 0 0 6px; }
++.status-dot { width: 4px; height: 4px; border-radius: 50%; background: #b7a0c3; }
++.record-limit { font-size: 8px; letter-spacing: .4px; color: #b9a7c9; font-variant-numeric: tabular-nums; }
++.voice-footer { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 8px; line-height: 1.8; color: #bca9ce; padding: 11px; background: #1b142332; border-top: 1px solid #e8d6ff0c; }
++.voice-card.is-recording .mic-orbit { animation: breathe 1.8s ease-in-out infinite; border-color: #d5b5e56b; }
++.voice-card.is-recording .record-button { background: linear-gradient(145deg, #cb9dbd, #a578b1, #9069a8); }
++.voice-card.is-recording .recording-dot { background: #f6bbd7; animation: blink 1.2s ease-in-out infinite; }
++.visit-plan { min-width: 0; padding: 20px 18px; border: 1px solid #e4dfec; border-radius: 11px; background: #fdfcfe; scroll-margin-top: 20px; }
++.support-heading { display: flex; align-items: center; gap: 11px; }
++.plan-icon { display: grid; place-items: center; width: 36px; height: 38px; border-radius: 9px; background: #eeebf6; color: #87719d; }
++.support-heading .eyebrow { font-size: 7px; letter-spacing: 1.2px; margin-bottom: 5px; }
++.support-heading h2 { font-size: 12px; letter-spacing: -.1px; font-weight: 500; color: #5d4c6e; margin-bottom: 0; }
++.plan-empty { padding-top: 22px; }
++.plan-placeholder { display: grid; gap: 9px; margin-bottom: 20px; }
++.plan-placeholder > span { display: block; height: 7px; width: 85%; background: #eeeaf4; border-radius: 2px; margin-left: 22px; position: relative; }
++.plan-placeholder > span::before { content: ''; position: absolute; left: -22px; top: -2px; width: 10px; height: 10px; border: 1px solid #d6cee2; border-radius: 3px; }
++.plan-placeholder > span:nth-child(2) { width: 66%; }
++.plan-placeholder > span:nth-child(3) { width: 75%; }
++.plan-empty p { font-size: 11px; line-height: 1.9; color: #82728f; margin-bottom: 5px; }
++.plan-empty > span { color: #9a8ba6; font-size: 9px; line-height: 1.8; }
++.privacy-details { padding: 0 3px; color: #8a7c98; font-size: 10px; line-height: 1.9; scroll-margin-top: 30px; }
++.privacy-details summary { min-height: 44px; padding: 9px 0; display: flex; align-items: center; gap: 9px; font-size: 10px; color: #82708f; }
++.privacy-details summary::after { content: '+'; margin-left: auto; font-size: 17px; }
++.privacy-details[open] summary::after { content: '−'; }
++.privacy-details p { margin: 7px 0; overflow-wrap: anywhere; }
++.privacy-details p[lang='te'] { font-size: 13px; }
++.reply-sources { padding: 0 3px; font-size: 11px; line-height: 1.9; color: #78638e; overflow-wrap: anywhere; }
++.reply-sources summary { min-height: 44px; padding: 9px 0; }
++.reply-sources a { text-decoration: underline; text-underline-offset: 3px; }
++.reply-sources p > span { display: block; font-size: 10px; color: #8d7b9d; }
++.page-footer { border-top: 1px solid var(--line); margin-top: 29px; padding: 20px 0 22px; display: flex; align-items: center; justify-content: space-between; gap: 18px; font-size: 8px; color: #92899e; line-height: 1.8; }
++.page-footer > span:first-child { font-size: 7px; letter-spacing: 1.5px; }
++.page-footer > span > span { margin: 0 6px; }
++.setup-note, .error-note { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #e9d5b6; color: #856237; background: #fffaf0; border-radius: 8px; padding: 13px; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
++.setup-note { margin-bottom: 20px; }
++.setup-note > svg, .error-note > svg { margin-top: 4px; }
++.setup-note > span, .error-note > div { flex: 1; min-width: 0; }
++.error-note { background: #fff5f5; border-color: #edcfcf; color: #934954; margin-bottom: 14px; }
++.error-note strong { font-size: 12px; font-weight: 600; }
++.error-note p { margin: 5px 0; }
++.error-note > div > span { display: block; font-size: 10px; color: #a36974; }
++.icon-button { flex-shrink: 0; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: inherit; margin: -8px -8px -8px 0; }
++.icon-button:hover { background: #00000005; }
++.preparation { margin-top: 21px; border-top: 1px solid #e7e0ee; padding-top: 17px; overflow-wrap: anywhere; }
++.checklist-title { font-size: 16px; font-weight: 500; color: #5f4a72; margin-bottom: 7px; }
++.checklist-notice { font-size: 12px; color: #887694; margin-bottom: 10px; }
++.coverage { font-size: 9px; color: #9988a4; line-height: 1.8; margin-bottom: 16px; }
++.checklist-items article { padding: 17px 0; border-top: 1px solid #e9e2ef; }
++.checklist-item-top { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
++.item-number { display: grid; place-items: center; width: 23px; height: 23px; background: #eeebf5; color: #8f77a3; border-radius: 4px; font-size: 9px; }
++.current-item .item-number { background: var(--gradient); color: #fff; }
++.current-item-label { font-size: 9px; color: #7a5995; }
++.item-kind { display: block; font-size: 10px; color: #9274a3; }
++.checklist-items h4 { font-size: 16px; font-weight: 500; margin: 9px 0; color: #5e486f; }
++.checklist-items article > p { font-size: 14px; color: #746080; margin-bottom: 12px; }
++.preparation button { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #ded2e9; border-radius: 6px; background: #fff; padding: 8px 11px; min-height: 44px; font-size: 12px; color: #80618f; }
++.preparation button:hover:enabled { background: #f1e9f8; border-color: #bba2cc; }
++.preparation details { font-size: 11px; line-height: 1.9; color: #8a7596; margin-top: 9px; }
++.preparation summary { min-height: 44px; padding: 10px 0; }
++.item-sources summary { display: flex; align-items: center; gap: 5px; font-size: 10px; }
++.item-sources summary::after { content: '+'; margin-left: auto; font-size: 16px; }
++.item-sources[open] summary::after { content: '−'; }
++.preparation a { text-decoration: underline; text-underline-offset: 3px; color: #73508a; }
++.preparation a > svg { margin-left: 3px; vertical-align: middle; }
++.document-sample { border-top: 1px solid #e6deee; padding-top: 4px; }
++.sample-paper { border: 1px dashed #c1a77c; padding: 12px; background: #fffaf0; color: #8d6a35; overflow-wrap: anywhere; }
++.sample-paper strong { font-size: 9px; letter-spacing: .5px; }
++.sample-paper h3 { font-size: 13px; font-weight: 500; line-height: 1.95; margin-top: 10px; }
++.sample-paper p { font-size: 12px; line-height: 1.95; }
++.spin { animation: spin 1s linear infinite; }
++/* Keep everyday instructions readable; small type is reserved for metadata. */
++.nav-item { font-size: 13px; }
++.sidebar-note p, .sidebar-privacy { font-size: 12px; }
++.independent-note { font-size: 11px; }
++.breadcrumb, .new-conversation { font-size: 12px; }
++.page-description { font-size: 14px; }
++.language-pill { font-size: 11px; }
++.conversation-heading h2 { font-size: 15px; }
++.session-note { font-size: 10px; }
++.empty-description, .empty-telugu { font-size: 14px; }
++.starter strong { font-size: 13px; }
++.starter small { font-size: 11px; }
++.detail-tag { font-size: 12px; }
++.message-meta { font-size: 9px; }
++.listen-button { min-height: 44px; font-size: 12px; }
++.conversation-actions button { min-height: 44px; font-size: 14px; }
++.composer-mode, .composer-help { font-size: 10px; }
++.send-button { min-height: 44px; font-size: 12px; }
++.conversation-footnote { font-size: 10px; }
++.voice-description p { font-size: 14px; }
++.voice-instruction, .voice-status { font-size: 11px; }
++.record-limit, .voice-footer { font-size: 10px; }
++.support-heading h2 { font-size: 14px; }
++.plan-empty p { font-size: 13px; }
++.plan-empty > span { font-size: 11px; }
++.privacy-details, .privacy-details summary { font-size: 12px; }
++.checklist-notice { font-size: 14px; }
++.checklist-items article > p { font-size: 16px; }
++.item-kind, .preparation details, .item-sources summary { font-size: 12px; }
++.preparation button { font-size: 14px; }
++.message-user { max-width: min(90%, 640px); }
++.assistant-body { max-width: 72ch; }
++.eyebrow, .session-note, .remembered-label, .message-meta, .message-meta > span,
++.conversation-beginning, .composer-mode, .composer-mode .keyboard-hint,
++.composer-help, .conversation-footnote, .page-footer, .coverage, .plan-empty > span,
++.item-kind, .starter small, .preparation details { color: #706078; }
++@keyframes spin { to { transform: rotate(360deg); } }
++@keyframes breathe { 50% { box-shadow: 0 0 0 10px #b988db0c, 0 0 25px #b988db14; } }
++@keyframes blink { 50% { opacity: .35; } }
++@keyframes message-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
++@keyframes audio-bars { to { transform: scaleY(.4); } }
++
++@media (min-width: 1700px) {
++  .app-shell { grid-template-columns: 240px minmax(0, 1fr); }
++  .sidebar { padding: 36px 25px 28px; }
++  .brand { font-size: 18px; }
++  .main-content { padding: 40px 48px 0; }
++  .workspace-grid { grid-template-columns: minmax(0, 1fr) 336px; gap: 30px; }
++  .topbar { padding-left: 48px; padding-right: 48px; }
++  .page-heading { margin-bottom: 34px; }
++  .conversation-empty { padding-top: 58px; padding-bottom: 49px; }
++  .conversation-empty h2 { font-size: 34px; }
++  .starter { padding: 18px 16px; }
++  .voice-interaction { padding-top: 43px; }
++  .voice-feedback { padding-bottom: 30px; }
++  .page-description { font-size: 14px; }
++}
++@media (max-width: 1199px) and (min-width: 901px) {
++  .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
++  .sidebar { padding: 27px 12px; align-items: center; }
++  .brand > span:last-child, .sidebar-note, .sidebar-privacy, .independent-note, .nav-caption { display: none; }
++  .sidebar-section { margin-top: 39px; }
++  .nav-item { font-size: 0; width: 47px; gap: 0; justify-content: center; padding: 10px; }
++  .nav-item > svg:last-child:not(:first-child), .nav-current { display: none; }
++  .nav-item > svg:first-child { width: 20px; height: 20px; }
++  .main-content { padding: 26px 24px 0; }
++  .topbar { padding-left: 25px; padding-right: 25px; }
++  .workspace-grid { grid-template-columns: minmax(0, 1fr) 276px; gap: 20px; }
++  .language-pill { font-size: 9px; gap: 6px; padding: 7px; }
++  .page-heading { gap: 14px; }
++  h1 { font-size: 29px; }
++  .page-description { font-size: 11px; max-width: 380px; }
++  .starter { gap: 8px; padding: 12px 10px; }
++  .starter > svg:first-child { width: 17px; }
++  .starter small { display: none; }
++  .keyboard-hint, .multiline-hint { display: none !important; }
++  .composer-dock { padding-left: 19px; padding-right: 19px; }
++  .conversation-heading, .remembered { padding-left: 20px; padding-right: 20px; }
++  .message-list { padding-left: 20px; padding-right: 20px; }
++}
++@media (max-width: 900px) {
++  .app-shell { display: block; }
++  .sidebar, .breadcrumb { display: none; }
++  .topbar { padding: 18px 26px; min-height: 77px; }
++  .mobile-brand { display: flex; align-items: center; gap: 9px; color: #6d5788; font-size: 17px; font-weight: 550; letter-spacing: -.5px; }
++  .main-content { padding: 27px 26px 0; max-width: 820px; }
++  .page-heading { margin-bottom: 23px; }
++  h1 { font-size: 32px; }
++  .workspace-grid { display: flex; flex-direction: column; gap: 22px; }
++  .support-column { display: contents; }
++  .voice-card { order: 1; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 200px; }
++  .voice-topline { grid-column: 1 / -1; padding: 16px 20px 0; }
++  .voice-interaction { display: flex; align-items: center; gap: 25px; padding: 21px 24px 23px; text-align: left; }
++  .mic-orbit { width: 105px; height: 105px; flex-shrink: 0; margin: 0; }
++  .record-button { width: 80px; height: 80px; }
++  .voice-description h2 { font-size: 18px; margin-bottom: 7px; }
++  .voice-feedback { align-self: center; padding: 10px 20px 10px 0; }
++  .voice-footer { grid-column: 1 / -1; padding: 8px; }
++  .conversation-surface { order: 2; width: 100%; }
++  .visit-plan { order: 3; width: 100%; padding: 22px; }
++  .reply-sources { order: 4; width: 100%; }
++  .privacy-details { order: 5; width: 100%; }
++  .conversation-empty { padding: 34px 28px 30px; }
++  .conversation-empty h2 { font-size: 29px; }
++  .composer-dock { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
++  .preparation { margin-top: 20px; }
++  .checklist-items { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 26px; align-items: start; }
++  .coverage { font-size: 11px; }
++  .checklist-items article > p { font-size: 15px; }
++  .privacy-details summary, .reply-sources summary { font-size: 12px; }
++  .page-footer { margin-top: 24px; }
++}
++@media (max-width: 600px) {
++  html { scroll-padding-top: 12px; }
++  .topbar { min-height: 69px; padding: 14px 16px; gap: 10px; }
++  .mobile-brand { font-size: 16px; gap: 7px; }
++  .mobile-brand > svg { width: 21px; }
++  .new-conversation { min-height: 44px; padding: 9px 10px; gap: 5px; font-size: 11px; }
++  .main-content { padding: 23px 16px 0; }
++  .page-heading { display: block; margin-bottom: 20px; }
++  .page-heading .eyebrow { font-size: 8px; letter-spacing: 1.5px; margin-bottom: 11px; }
++  h1 { font-size: 30px; letter-spacing: -1px; line-height: 1.35; }
++  .small-break { display: block; }
++  .page-description { font-size: 12px; line-height: 1.85; max-width: 340px; }
++  .language-pill { margin-top: 13px; font-size: 9px; padding: 5px 8px; }
++  .workspace-grid { gap: 17px; }
++  .voice-card { grid-template-columns: minmax(0, 1fr); border-radius: 11px; }
++  .voice-topline { padding: 13px 15px 0; }
++  .voice-topline > span:first-child { font-size: 7px; letter-spacing: 1.1px; }
++  .voice-language { font-size: 10px; }
++  .voice-interaction { padding: 17px 18px 14px; gap: 20px; }
++  .mic-orbit { width: 82px; height: 82px; box-shadow: 0 0 0 5px #c294ed04; }
++  .record-button { width: 65px; height: 65px; }
++  .record-button > svg { width: 27px; height: 27px; }
++  .voice-description h2 { font-size: 15px; line-height: 1.5; margin-bottom: 5px; letter-spacing: -.3px; }
++  .voice-description p { font-size: 12px; margin-bottom: 1px; }
++  .voice-instruction { font-size: 9px; line-height: 1.7; }
++  .voice-feedback { grid-column: 1 / -1; padding: 0 15px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
++  .waveform { display: none; }
++  .is-recording .waveform { display: flex; width: 100%; height: 25px; margin-bottom: 1px; }
++  .voice-status { font-size: 9px; margin: 0; }
++  .record-limit { font-size: 7px; }
++  .voice-footer { padding: 8px; font-size: 7px; }
++  .conversation-heading { padding: 15px; gap: 8px; }
++  .conversation-heading h2 { font-size: 13px; }
++  .session-note { font-size: 8px; gap: 4px; }
++  .conversation-empty { padding: 29px 19px 25px; }
++  .welcome-mark { width: 54px; height: 54px; border-radius: 16px; margin-bottom: 23px; }
++  .welcome-mark > svg { width: 27px; }
++  .conversation-empty .eyebrow { font-size: 7px; letter-spacing: 1.15px; margin-bottom: 12px; }
++  .conversation-empty h2 { font-size: 25px; letter-spacing: -.6px; }
++  .empty-description { font-size: 12px; }
++  .empty-telugu { font-size: 12px; margin-bottom: 23px; }
++  .starter-grid { grid-template-columns: 1fr; gap: 9px; text-align: left; }
++  .starter { padding: 13px; gap: 12px; align-items: center; }
++  .starter strong { font-size: 12px; }
++  .starter small { font-size: 10px; margin-top: 3px; }
++  .starter > svg:last-child { width: 15px; }
++  .remembered { padding: 13px 15px 0; gap: 5px; }
++  .remembered-label { font-size: 7px; width: 100%; margin-bottom: 3px; }
++  .detail-tag { font-size: 11px; }
++  .message-list { padding: 23px 15px 3px; }
++  .message-user { max-width: 93%; padding: 11px 14px; margin-bottom: 22px; }
++  .message-copy { font-size: 17px; line-height: 2; }
++  .message-assistant { gap: 9px; padding-right: 0; }
++  .assistant-avatar { width: 27px; height: 29px; border-radius: 8px; }
++  .assistant-avatar > svg { width: 16px; }
++  .message-meta { font-size: 7px; letter-spacing: .8px; }
++  .message-meta > span { display: none; }
++  .listen-button { min-height: 44px; font-size: 11px; padding: 9px 11px; }
++  .message-loading { font-size: 11px; gap: 7px; }
++  .composer-dock { padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
++  .conversation-actions { gap: 6px; margin-bottom: 12px; }
++  .conversation-actions button { font-size: 13px; min-height: 44px; padding: 7px 9px; }
++  .text-entry { padding: 12px 10px 8px; }
++  .text-entry textarea { font-size: 16px; min-height: 52px; }
++  .text-entry textarea::placeholder { font-size: 12px; }
++  .composer-mode { font-size: 8px; gap: 0; padding-bottom: 10px; }
++  .keyboard-hint, .multiline-hint { display: none !important; }
++  .composer-buttons { gap: 3px; }
++  .composer-mic { min-width: 44px; }
++  .send-button { min-height: 44px; padding: 9px 12px; font-size: 11px; gap: 7px; }
++  .composer-help { font-size: 8px; align-items: flex-start; gap: 4px; }
++  .conversation-footnote { padding: 12px; font-size: 8px; text-align: left; }
++  .visit-plan { padding: 20px 17px; }
++  .support-heading h2 { font-size: 14px; }
++  .support-heading .eyebrow { font-size: 8px; }
++  .checklist-items { grid-template-columns: minmax(0, 1fr); }
++  .checklist-notice { font-size: 14px; }
++  .coverage { font-size: 10px; }
++  .checklist-items h4 { font-size: 18px; }
++  .item-kind { font-size: 12px; }
++  .checklist-items article > p { font-size: 16px; }
++  .preparation button { font-size: 14px; }
++  .preparation details { font-size: 12px; }
++  .item-sources summary { font-size: 11px; }
++  .privacy-details p { font-size: 12px; }
++  .privacy-details p[lang='te'] { font-size: 15px; }
++  .page-footer { display: block; text-align: center; font-size: 9px; line-height: 2.2; padding-bottom: max(24px, env(safe-area-inset-bottom)); }
++  .page-footer > span { display: block; }
++  .page-footer > span:first-child { font-size: 7px; margin-bottom: 5px; }
++  .setup-note, .error-note { padding: 11px; gap: 8px; }
++  .setup-note { font-size: 13px; }
++  .error-note > div > span { font-size: 11px; }
++}
++@media (max-width: 360px) {
++  .main-content { padding-left: 12px; padding-right: 12px; }
++  .topbar { padding-left: 12px; padding-right: 12px; }
++  .mobile-brand { font-size: 14px; gap: 5px; }
++  .mobile-brand > svg { width: 19px; }
++  .new-conversation { font-size: 10px; gap: 4px; padding: 9px 7px; }
++  h1 { font-size: 28px; }
++  .voice-interaction { padding-left: 14px; padding-right: 14px; gap: 14px; }
++  .voice-description h2 { font-size: 14px; }
++  .voice-description p { font-size: 12px; }
++  .voice-instruction { font-size: 8px; }
++  .conversation-empty { padding-left: 15px; padding-right: 15px; }
++  .conversation-empty h2 { font-size: 23px; }
++  .conversation-actions button { font-size: 12px; padding-left: 8px; padding-right: 8px; }
++  .composer-help { font-size: 7px; }
++}
++@media (prefers-reduced-motion: reduce) {
++  html { scroll-behavior: auto; }
++  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
++}
+--- index.html (before)
++++ index.html
+@@ -2,10 +2,10 @@
+ <html lang="en">
+   <head>
+     <meta charset="UTF-8" />
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <meta name="theme-color" content="#f6f8f6" />
+-    <meta name="description" content="Speak in Telugu. See your words and hear a helpful reply with Voice Companion." />
+-    <title>Voice Companion · Telugu voice check</title>
++    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
++    <meta name="theme-color" content="#1c1b25" />
++    <meta name="description" content="A little guidance for your next bank visit. Type in Telugu or English, or speak naturally in Telugu with Voice Companion." />
++    <title>Voice Companion · Banking, in your own words</title>
+   </head>
+   <body>
+     <div id="root"></div>
+--- src/Conversation.tsx (before)
++++ src/Conversation.tsx
+@@ -0,0 +1,56 @@
++import { AudioLines, ArrowUpRight, Check, FileText, Landmark, LoaderCircle, Square, Volume2 } from 'lucide-react';
++
++export type ConversationTurn = {
++  session_id: string;
++  turn_id: string;
++  transcript: string;
++  reply: string;
++  details: Record<string, string | null>;
++};
++
++const starters = [
++  { icon: Landmark, label: 'Open a bank account', detail: 'Start with the basics', message: 'నేను SBIలో ఖాతా తెరవాలనుకుంటున్నా.' },
++  { icon: FileText, label: 'Understand a document', detail: 'Make unfamiliar words familiar', message: 'PAN అంటే ఏంటి?' },
++];
++
++export function Conversation({ turns, disabled, loading, loadingText, restoring, onAsk, audioBusy, playing, audioUrl, onListen }: {
++  turns: ConversationTurn[]; disabled: boolean; loading: boolean; loadingText: string; restoring: boolean;
++  onAsk: (message: string) => void; audioBusy: boolean; playing: boolean; audioUrl: string; onListen: () => void;
++}) {
++  if (!turns.length) return <div className="conversation-empty">
++    <span className="welcome-mark" aria-hidden="true"><AudioLines size={30} strokeWidth={1.5} /></span>
++    <p className="eyebrow">A LITTLE GUIDANCE GOES A LONG WAY</p>
++    <h2>Let’s make your next<br />bank visit a little easier.</h2>
++    <p className="empty-description">Ask a question. Say it your way.<br />We’ll take it one step at a time.</p>
++    <p className="empty-telugu" lang="te">మీ మాటల్లో అడగండి. కలిసి తెలుసుకుందాం.</p>
++    <div className="starter-grid">{starters.map(({ icon: Icon, label, detail, message }) =>
++      <button key={label} className="starter" disabled={disabled} onClick={() => onAsk(message)}>
++        <Icon size={21} strokeWidth={1.6} aria-hidden="true" /><span><strong>{label}</strong><small>{detail}</small></span><ArrowUpRight size={17} aria-hidden="true" />
++      </button>)}</div>
++    {restoring && <p className="inline-status" role="status"><LoaderCircle size={16} className="spin" /> Restoring your conversation…</p>}
++    {loading && <p className="inline-status" role="status"><LoaderCircle size={16} className="spin" />{loadingText}</p>}
++  </div>;
++
++  return <div className="message-list" role="log" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions" aria-busy={loading}>
++    <div className="conversation-beginning"><span />YOUR CONVERSATION<span /></div>
++    {turns.map((turn, index) => <div className="message-turn" key={turn.turn_id}>
++      <article className="message message-user" aria-label={`Your message ${index + 1}`}>
++        <div className="message-meta">YOU <Check size={13} aria-label="Received" /></div>
++        <p className="message-copy" dir="auto">{turn.transcript}</p>
++      </article>
++      <article className="message message-assistant" aria-label={`Companion reply ${index + 1}`}>
++        <div className="assistant-avatar" aria-hidden="true"><AudioLines size={18} /></div>
++        <div className="assistant-body"><div className="message-meta">VOICE COMPANION<span>One step at a time</span></div>
++          <p className="message-copy" dir="auto">{turn.reply}</p>
++          {index === turns.length - 1 && <button className={`listen-button ${playing ? 'is-playing' : ''}`} onClick={onListen} disabled={disabled || audioBusy}
++            aria-label={audioBusy ? 'Preparing reply audio' : playing ? 'Stop reply playback' : audioUrl ? 'Listen to reply' : 'Retry generating reply audio'}>
++            {audioBusy ? <LoaderCircle size={16} className="spin" /> : playing ? <Square size={13} /> : <Volume2 size={16} />}
++            {audioBusy ? 'Preparing audio…' : playing ? 'Stop playback' : audioUrl ? 'Listen to reply' : 'Retry reply audio'}
++            {playing && <span className="playback-indicator" aria-hidden="true"><i /><i /><i /></span>}
++          </button>}
++        </div>
++      </article>
++    </div>)}
++    {loading && <div className="message-loading" role="status"><span className="assistant-avatar"><AudioLines size={18} /></span><LoaderCircle size={16} className="spin" /><span>{loadingText}</span></div>}
++  </div>;
++}
+--- src/VoiceControl.tsx (before)
++++ src/VoiceControl.tsx
+@@ -0,0 +1,26 @@
++import { AudioLines, Languages, LoaderCircle, Mic, ShieldCheck, Square } from 'lucide-react';
++import { MAX_SECONDS } from './audio';
++
++export function VoiceControl({ recording, busy, stage, seconds, level, status, onToggle }: {
++  recording: boolean; busy: boolean; stage: string; seconds: number; level: number; status: string; onToggle: () => void;
++}) {
++  return <section className={`voice-card ${recording ? 'is-recording' : ''}`} aria-labelledby="voice-heading" id="voice-space">
++    <div className="voice-topline"><span><AudioLines size={15} /> YOUR VOICE SPACE</span><span className="voice-language" lang="te"><Languages size={14} /> తెలుగు</span></div>
++    <div className="voice-interaction">
++      <div className="mic-orbit"><button className="record-button" onClick={onToggle} disabled={busy}
++        aria-label={recording ? 'Stop recording' : 'Start recording'} aria-pressed={recording}>
++        {busy ? <LoaderCircle size={31} className="spin" /> : recording ? <Square size={27} fill="currentColor" /> : <Mic size={34} strokeWidth={1.6} />}
++      </button></div>
++      <div className="voice-description"><h2 id="voice-heading">{recording ? 'You speak. We listen.' : busy ? 'One moment…' : 'A conversation, naturally.'}</h2>
++        <p lang="te">{recording ? 'మాట్లాడండి, నేను వింటున్నాను' : 'మీ మాటల్లో చెప్పండి'}</p>
++        <span className="voice-instruction">{recording ? 'Tap the square to finish' : busy ? (stage === 'permission' ? 'Allow access to your microphone' : 'Your conversation will appear here') : 'Tap the mic to start speaking'}</span>
++      </div>
++    </div>
++    <div className="voice-feedback">
++      <div className={`waveform ${recording ? 'active' : ''}`} aria-hidden="true">{Array.from({ length: 29 }, (_, index) => <span key={index} style={{ height: `${recording ? 4 + level * (10 + (Math.sin(index * 1.8) + 1) * 20) : 4}px` }} />)}</div>
++      <p className="voice-status" role="status"><span className={`status-dot ${recording ? 'recording-dot' : ''}`} />{status}</p>
++      <span className="record-limit">{recording ? `0:${seconds.toString().padStart(2, '0')} / 0:${MAX_SECONDS}` : `Telugu voice · Up to ${MAX_SECONDS} seconds`}</span>
++    </div>
++    <div className="voice-footer"><ShieldCheck size={14} /><span>Audio is sent to Gnani for processing.</span></div>
++  </section>;
++}
+--- src/Conversation.test.tsx (before)
++++ src/Conversation.test.tsx
+@@ -0,0 +1,42 @@
++import { describe, expect, it } from 'vitest';
++import { renderToStaticMarkup } from 'react-dom/server';
++import { Conversation, type ConversationTurn } from './Conversation';
++
++const props = { turns: [] as ConversationTurn[], disabled: false, loading: false, loadingText: 'Thinking through your question…', restoring: false, onAsk: () => {}, audioBusy: false, playing: false, audioUrl: '', onListen: () => {} };
++const turn = (id: string, transcript = 'PAN అంటే ఏంటి?'): ConversationTurn => ({ session_id: 'same-session', turn_id: id, transcript, reply: `సమాధానం ${id}\nSecond line <safe>`, details: { bank: 'SBI' } });
++
++describe('unified text and voice conversation presentation', () => {
++  it('offers real question starters without presenting invented conversation turns', () => {
++    const html = renderToStaticMarkup(<Conversation {...props} disabled />);
++    expect(html).toContain('Open a bank account');
++    expect(html).toContain('Understand a document');
++    expect(html.match(/<button[^>]*disabled/g)).toHaveLength(2);
++    expect(html).not.toContain('message-user');
++    expect(html).not.toContain('Listen to reply');
++  });
++  it('retains all turns, multilingual text, and long multiline replies in order', () => {
++    const turns = [turn('first', 'తెలుగు & English'), turn('second', 'a'.repeat(2000))];
++    const html = renderToStaticMarkup(<Conversation {...props} turns={turns} audioUrl="blob:test" />);
++    expect(html.indexOf('సమాధానం first')).toBeLessThan(html.indexOf('సమాధానం second'));
++    expect(html).toContain('తెలుగు &amp; English');
++    expect(html).toContain('a'.repeat(2000));
++    expect(html).toContain('\nSecond line &lt;safe&gt;');
++    expect(html).toContain('role="log"');
++    expect(html.match(/aria-label="Listen to reply"/g)).toHaveLength(1);
++  });
++  it('presents actual processing, playback, preparation, and retry states distinctly', () => {
++    const turns = [turn('only')];
++    const loading = renderToStaticMarkup(<Conversation {...props} turns={turns} loading disabled />);
++    expect(loading).toContain('Thinking through your question…');
++    expect(loading).toContain('aria-busy="true"');
++    const processing = renderToStaticMarkup(<Conversation {...props} turns={turns} audioBusy />);
++    expect(processing).toContain('Preparing reply audio');
++    expect(processing).toContain('disabled');
++    const playing = renderToStaticMarkup(<Conversation {...props} turns={turns} audioUrl="blob:test" playing />);
++    expect(playing).toContain('Stop reply playback');
++    expect(playing).toContain('playback-indicator');
++    const retry = renderToStaticMarkup(<Conversation {...props} turns={turns} />);
++    expect(retry).toContain('Retry generating reply audio');
++    expect(retry).not.toContain('playback-indicator');
++  });
++});
+--- src/VoiceControl.test.tsx (before)
++++ src/VoiceControl.test.tsx
+@@ -0,0 +1,36 @@
++import { describe, expect, it } from 'vitest';
++import { renderToStaticMarkup } from 'react-dom/server';
++import { VoiceControl } from './VoiceControl';
++
++const props = { recording: false, busy: false, stage: 'idle', seconds: 0, level: 0, status: 'Ready when you are', onToggle: () => {} };
++
++describe('truthful voice-control presentation', () => {
++  it('never shows recording or animated activity while idle', () => {
++    const html = renderToStaticMarkup(<VoiceControl {...props} />);
++    expect(html).toContain('aria-label="Start recording"');
++    expect(html).toContain('aria-pressed="false"');
++    expect(html).toContain('Ready when you are');
++    expect(html).not.toContain('waveform active');
++    expect(html).not.toContain('is-recording');
++    expect(html).not.toContain('Listening to you');
++  });
++  it('uses captured recording state and level for the stop control and waveform', () => {
++    const html = renderToStaticMarkup(<VoiceControl {...props} recording stage="recording" seconds={9} level={0.7} status="Listening to you…" />);
++    expect(html).toContain('aria-label="Stop recording"');
++    expect(html).toContain('aria-pressed="true"');
++    expect(html).toContain('waveform active');
++    expect(html).toContain('0:09 / 0:25');
++    expect(html).not.toContain('disabled');
++    const silent = renderToStaticMarkup(<VoiceControl {...props} recording stage="recording" level={0} />);
++    expect(silent.match(/height:4px/g)).toHaveLength(29);
++  });
++  it('distinguishes permission and processing states without claiming to listen', () => {
++    const html = renderToStaticMarkup(<VoiceControl {...props} busy stage="permission" status="Waiting for microphone access…" />);
++    expect(html).toContain('Allow access to your microphone');
++    expect(html).toContain('disabled');
++    expect(html).not.toContain('waveform active');
++    const processing = renderToStaticMarkup(<VoiceControl {...props} busy stage="transcribing" status="Turning your speech into words…" />);
++    expect(processing).toContain('Turning your speech into words…');
++    expect(processing).not.toContain('is-recording');
++  });
++});
+--- src/App.test.tsx (before)
++++ src/App.test.tsx
+@@ -0,0 +1,21 @@
++import { describe, expect, it } from 'vitest';
++import { renderToStaticMarkup } from 'react-dom/server';
++import App from './App';
++
++describe('accessible conversation shell', () => {
++  it('provides one labelled multiline composer, independent microphone access, and honest language support', () => {
++    const html = renderToStaticMarkup(<App />);
++    expect(html).toContain('Skip to message');
++    expect(html).toContain('for="message"');
++    expect(html).toContain('<textarea');
++    expect(html).toContain('maxLength="2000"');
++    expect(html).toContain('aria-label="Send message"');
++    expect(html).toContain('aria-label="Start recording"');
++    expect(html).toContain('aria-label="Start recording from message composer"');
++    expect(html).toContain('English text');
++    expect(html).not.toContain('<select');
++    expect(html).not.toContain('type="file"');
++    expect(html).toContain('Restoring your conversation');
++    expect(html).not.toContain('Listening to you');
++  });
++});

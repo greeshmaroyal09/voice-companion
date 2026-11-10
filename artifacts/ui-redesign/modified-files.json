@@ -1,0 +1,47 @@
+[
+  {
+    "file": "src/App.tsx",
+    "new": false,
+    "lines": 318
+  },
+  {
+    "file": "src/Checklist.tsx",
+    "new": false,
+    "lines": 30
+  },
+  {
+    "file": "src/styles.css",
+    "new": false,
+    "lines": 463
+  },
+  {
+    "file": "index.html",
+    "new": false,
+    "lines": 14
+  },
+  {
+    "file": "src/Conversation.tsx",
+    "new": true,
+    "lines": 56
+  },
+  {
+    "file": "src/VoiceControl.tsx",
+    "new": true,
+    "lines": 26
+  },
+  {
+    "file": "src/Conversation.test.tsx",
+    "new": true,
+    "lines": 42
+  },
+  {
+    "file": "src/VoiceControl.test.tsx",
+    "new": true,
+    "lines": 36
+  },
+  {
+    "file": "src/App.test.tsx",
+    "new": true,
+    "lines": 21
+  }
+]

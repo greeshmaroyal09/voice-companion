@@ -1,0 +1,29 @@
+import { Volume2 } from 'lucide-react';
+
+type Source = { title: string; url: string; checked_on: string; published_or_updated: string | null; effective_date: string | null };
+type Item = { id: string; title: string; kind: string; text: string; status: string; conditions: string; exceptions: string; category: string; branch_confirmation: boolean; sources: Source[] };
+export type Preparation = { checklist: Item[]; answers: Record<string, string>; focus: string; pending: string; coverage: string; notice: string; reply_sources?: Source[] };
+const kinds: Record<string, string> = { alternatives: 'ప్రత్యామ్నాయాలు', required: 'అవసరం / వర్తించే మార్గం', conditional: 'పరిస్థితిని బట్టి', branch_confirmation: 'బ్రాంచ్‌తో నిర్ధారించండి', product: 'ఖాతా వివరాలు' };
+
+export function Checklist({ preparation, disabled, onAsk }: { preparation?: Preparation; disabled: boolean; onAsk: (text: string) => void }) {
+  if (!preparation?.checklist.length) return null;
+  return <section className="preparation" aria-label="Bank visit checklist">
+    <h2 lang="te">బ్యాంకుకు వెళ్లే ముందు</h2>
+    <p lang="te">{preparation.notice}</p>
+    <p className="coverage">{preparation.coverage}</p>
+    <div className="checklist-items">{preparation.checklist.map(item => <article key={item.id}>
+      <span className="item-kind" lang="te">{kinds[item.kind]}{item.status === 'unverified' ? ' · ఇంకా ధృవీకరించలేదు' : item.status === 'needs_confirmation' ? ' · తాజా విధానం నిర్ధారించాలి' : ''}</span>
+      <h3 lang="te">{item.title}</h3><p lang="te">{item.text}</p>
+      <button disabled={disabled} onClick={() => onAsk(({identity: 'గుర్తింపు పత్రం అంటే ఏంటి?', tax: 'PAN అంటే ఏంటి?', address: 'చిరునామా గురించి చెప్పు', existing: 'ఇప్పటికే KYC గురించి చెప్పు', small: 'ఏ పత్రమూ లేదు', visit: 'కాపీలు ఎన్ని?'} as Record<string,string>)[item.id] ?? 'తర్వాత')}><Volume2 size={19} aria-hidden="true" /> వివరించు / Explain</button>
+      <details><summary>ఆధారాలు / Official sources</summary>
+        <p>{item.category}</p><p>Conditions: {item.conditions}</p><p>Exceptions: {item.exceptions}</p>
+        {item.branch_confirmation && <p lang="te">మీ పరిస్థితికి వర్తించే విధానాన్ని బ్రాంచ్‌తో నిర్ధారించండి.</p>}
+        {item.sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a><br />Checked: {source.checked_on} · Published/updated: {source.published_or_updated ?? 'Not stated'} · Effective date: {source.effective_date ?? 'Not stated'}</p>)}
+      </details>
+    </article>)}</div>
+    <details className="document-sample"><summary>పత్రం ఎలా ఉంటుంది? / Illustrative sample</summary>
+      <div className="sample-paper"><strong>SAMPLE — NOT A VALID DOCUMENT</strong><h3>గుర్తింపు / చిరునామా పత్రం — వివరణ మాత్రమే</h3><p>పేరు: [కల్పిత వ్యక్తి]</p><p>చిరునామా: [నమూనా చిరునామా]</p><p>పత్రం సంఖ్య: [ఇక్కడ ఇవ్వవద్దు]</p><strong>SAMPLE — NOT A VALID DOCUMENT</strong></div>
+      <p lang="te">పేరు, చిరునామా ఎక్కడ ఉండవచ్చో చూపే బోధనా నమూనా మాత్రమే. ఇది ప్రభుత్వ పత్రం రూపానికి ప్రతిరూపం కాదు. అనుమతించిన అసలు పత్రాన్ని బ్యాంకు పరిశీలిస్తుంది.</p>
+    </details>
+  </section>;
+}

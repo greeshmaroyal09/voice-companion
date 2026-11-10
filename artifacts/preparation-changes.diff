@@ -1,0 +1,717 @@
+--- backend/conversation.py (before)
++++ backend/conversation.py
+@@ -53,7 +53,7 @@
+                 or re.search(CHECKLIST_REQUEST, text, re.I))
+ 
+ 
+-def form_discussion_reply(text, interpretation, prep):
++def form_discussion_reply(text, interpretation, prep, bank=None):
+     has_form = re.search(FORM_MENTION, text, re.I) is not None
+     is_question = re.search(FORM_QUESTION, text, re.I) is not None
+     interpreted_form = bool(interpretation and interpretation.document == 'declaration')
+@@ -67,20 +67,20 @@
+     unclear = bool(interpretation and interpretation.unclear_form_reference) or bool(re.search(UNCLEAR_FORM, text, re.I))
+     if '60' in numbers and unclear:
+         reply = (
+-            "PAN ఇవ్వని సందర్భంలో RBI మార్గదర్శకంలో Form 60 ప్రస్తావన ఉంది. "
+-            "SBI వెబ్‌సైట్‌లో Form 60 అని లేబుల్ చేసిన లింక్ ప్రస్తుతం Form 97 PDFను తెరుస్తోంది; "
+-            "ఇవి ఒకటే అని ఊహించలేను. రెండో ఫారం నంబర్ ఏది?"
++            "PAN లేకపోతే సాధారణంగా Form 60 ప్రకటన ఇస్తారు. "
++            "ప్రస్తుత ఫారాన్ని SBI శాఖతో నిర్ధారించండి. మీరు అడిగిన మరో ఫారం నంబర్ ఏది?"
+         )
+     elif '97' in numbers:
+         reply = (
+-            "మీరు Form 97 అన్నారు. SBI వెబ్‌సైట్‌లో Form 60 అని లేబుల్ చేసిన లింక్ ప్రస్తుతం "
+-            "Form 97 PDFను చూపుతోంది; RBI మార్గదర్శకంలో Form 60 ఉంది. ఇవి సమానమని లేదా మీకు "
+-            "ఏది వర్తిస్తుందని ఊహించను—తాజా ఫారం, అర్హతను SBI బ్రాంచ్‌తో నిర్ధారించండి."
++            "మీరు Form 97 అన్నారు. PAN లేకపోతే సాధారణంగా Form 60 ప్రకటన ఇస్తారు. "
++            "మీకు ప్రస్తుతం వర్తించే ఫారాన్ని SBI శాఖతో నిర్ధారించండి."
+         )
+     elif '60' in numbers:
+         reply = DOCUMENTS['declaration']['explanation']
+     else:
+         reply = "RBI మార్గదర్శకంలో PAN ఇవ్వని సందర్భానికి Form 60 ప్రస్తావన ఉంది. మీరు అడిగిన ఫారం నంబర్‌ను స్పష్టంగా చెబుతారా?"
++    if bank:
++        reply = reply.replace('మీ బ్యాంకుతో', f'{bank} శాఖతో')
+     discuss(prep, 'declaration', reply)
+     return reply
+ 
+@@ -115,15 +115,6 @@
+             self.preparation.answers.get(key) == 'no' for key in ('single', 'adult', 'resident')
+         ):
+             return LIMIT
+-        if self.preparation.pending:
+-            return ONBOARDING_QUESTIONS.get(self.preparation.pending, QUESTIONS.get(self.awaiting, ''))
+-        for key in ('single', 'adult', 'resident', 'existing'):
+-            if key == 'existing' and key in self.preparation.answers:
+-                continue
+-            if self.preparation.answers.get(key) != 'yes':
+-                self.preparation.pending = key
+-                return ONBOARDING_QUESTIONS[key]
+-
+         self.preparation.reply_source_ids = list(dict.fromkeys(
+             ENTRIES['identity']['source_ids'] + ENTRIES['address']['source_ids']
+             + ENTRIES['tax']['source_ids'] + ENTRIES['visit']['source_ids']
+@@ -161,8 +152,12 @@
+ 
+     def advance(self, text: str, interpretation=None) -> dict:
+         text = text.strip()
+-        fresh_conversation = not self.turns
+-        form_reply = form_discussion_reply(text, interpretation, self.preparation)
++        full_list = bool(re.fullmatch(r'\s*(మొత్తం జాబితా చెప్పు|full list|మొత్తం జాబితా)[.!\s]*', text, re.I))
++        if self.preparation.focus == 'done' and not self.preparation.interrupted and re.fullmatch(r'\s*(అవును|yes|సరే|okay|ok)[.!\s]*', text, re.I):
++            full_list = True
++        if full_list and self.details['bank'] == 'SBI' and self.details['intent'] == 'open_account':
++            return self.save_turn(text, self._checklist_reply() if self.preparation.supported(self.details) and 'existing' in self.preparation.answers else self._quick_sbi_checklist_reply())
++        form_reply = form_discussion_reply(text, interpretation, self.preparation, self.details['bank'])
+         if form_reply is not None:
+             return self.save_turn(text, form_reply)
+         wants_checklist = checklist_request(text, interpretation)
+@@ -192,8 +187,8 @@
+                 if interpretation.adult_explicit and interpretation.age_subject in ('speaker', 'account_holder'):
+                     self.preparation.answers['adult'] = 'yes' if interpretation.adult else 'no'
+         onboarding_answer = previous_answers != self.preparation.answers or previous_self != self.preparation.account_for_self
+-        interruption = None if wants_checklist else handle_interruption(
+-            text, self.preparation, self.turns[-1]['reply'] if self.turns else '', pending_question
++        interruption = None if wants_checklist or self.preparation.walkthrough_answer(text) else handle_interruption(
++            text, self.preparation, self.turns[-1]['reply'] if self.turns else '', pending_question, self.details['bank']
+         )
+         if interruption is not None and not onboarding_answer:
+             return self.save_turn(text, interruption)
+@@ -290,7 +285,7 @@
+                         recognized = location_changed = True
+             if (self.awaiting == "location" or self.quick_checklist_shown or any(previous[s] and self.details[s] is None for s in ("town", "branch"))) and not location_changed:
+                 value = clean_location(clause)
+-                if value and len(value.split()) <= 4 and not re.search(r"[?]|ధన్యవాద|సరే|అవును|thanks|okay|yes|ఎందుకు|ఏమిటి|ఏంటి|ఎలా|పత్రాలు|documents|లేదు|PAN|ఆధార్|మళ్ళీ|మళ్లీ|repeat|adult|resident|సేవింగ్స్", clause, re.I):
++                if value and len(value.split()) <= 4 and not re.search(r"[?]|ధన్యవాద|సరే|అవును|thanks|okay|yes|ఎందుకు|ఏమిటి|ఏంటి|ఎలా|పత్రాలు|documents|లేదు|PAN|ఆధార్|మళ్ళీ|మళ్లీ|repeat|adult|resident|సేవింగ్స్|తర్వాత|తరువాత|next|skip|కొనసాగించు|continue|ఉంది|ఉన్నాయి|no|నిండాయి", clause, re.I):
+                     slot = "branch" if previous["branch"] and self.details["branch"] is None else "town"
+                     self.details[slot] = value
+                     recognized = location_changed = True
+@@ -356,27 +351,12 @@
+             self.preparation.pending = ''
+             self.awaiting = ''
+             return self.save_turn(text, LIMIT)
+-        initial_sbi_opening = (
+-            fresh_conversation and self.details['bank'] == 'SBI'
+-            and self.details['intent'] == 'open_account' and bool(intent_hits)
+-            and not self.preparation.answers
+-        )
+-        location_added_to_quick_checklist = (
+-            self.quick_checklist_shown and self.details['bank'] == 'SBI'
+-            and self.details['intent'] == 'open_account'
+-            and (previous['town'] != self.details['town'] or previous['branch'] != self.details['branch'])
+-        )
+-        if wants_checklist and self.details['bank'] == 'SBI' and self.details['intent'] == 'open_account' and unsupported_scope:
++        if self.details['bank'] == 'SBI' and self.details['intent'] == 'open_account':
++            self.quick_checklist_shown = True
+             self.awaiting = ''
+-            return self.save_turn(text, LIMIT)
+-        quick_checklist_turn = initial_sbi_opening or location_added_to_quick_checklist or (
+-            wants_checklist and self.quick_checklist_shown
+-        )
+-        if self.details['bank'] == 'SBI' and self.details['intent'] == 'open_account' and not unsupported_scope and quick_checklist_turn:
+-            self.quick_checklist_shown = True
+-            self.preparation.pending = ''
+-            self.awaiting = ''
+-            return self.save_turn(text, self._quick_sbi_checklist_reply())
++            return self.save_turn(text, self.preparation.respond(
++                text, self.details, '', self.turns[-1]['reply'] if self.turns else ''
++            ))
+ 
+         if wants_checklist:
+             return self.save_turn(text, self._checklist_reply())
+--- backend/preparation.py (before)
++++ backend/preparation.py
+@@ -1,7 +1,7 @@
+ """Bounded Telugu/English preparation state machine, not an LLM."""
+ import re
+ from dataclasses import dataclass, field
+-from backend.knowledge import ENTRIES, SOURCES, checklist
++from backend.knowledge import ENTRIES, SOURCES, DOCUMENTS, checklist
+ 
+ SCOPE = 'ఇది మీ ఒక్కరి పేరుతో సాధారణ సేవింగ్స్ ఖాతానా?'
+ LIMIT = 'ప్రస్తుతం SBIలో భారత నివాసి అయిన పెద్దవారి వ్యక్తిగత సాధారణ సేవింగ్స్ ఖాతా సందర్శనకే ధృవీకరించిన సహాయం ఉంది. మీ పరిస్థితికి SBI నియమాలను వర్తింపజేయను; సంబంధిత బ్యాంకుతో నిర్ధారించండి.'
+@@ -121,9 +121,60 @@
+                 'reply_sources': [SOURCES[k] for k in self.reply_source_ids],
+                 'notice': 'ఇది సందర్శనకు సన్నాహం మాత్రమే. ఖాతా తప్పకుండా తెరుస్తారని హామీ కాదు.'}
+ 
++    def walkthrough_answer(self, text):
++        """Only answers to the active item advance it; document questions interrupt."""
++        if self.pending or self.interrupted or self.focus not in ('identity', 'address', 'tax', 'existing', 'visit', 'small'):
++            return None
++        if re.fullmatch(r'\s*(అవును|ఉంది|ఉన్నాయి|yes|i have it)[.!\s]*', text, re.I):
++            return 'yes'
++        if re.fullmatch(r'\s*(లేదు|లేవు|కాదు|no|నాకు అది లేదు)[.!\s]*', text, re.I):
++            return 'no'
++        if re.search(r'\?|ఏంటి|అంటే|ఏం|ఎలా|what|why|how|లేకపోతే|without', text, re.I):
++            return None
++        topics = {'identity': r'ఆధార్|పాస్.?పోర్ట్|passport|వోటర్|ఓటర్|identity|OVD',
++                  'tax': r'PAN|పాన్', 'address': r'చిరునామా|address'}
++        if self.focus in topics and re.search(topics[self.focus], text, re.I):
++            if re.search(r'లేదు|లేవు|కాదు|పాత|old|don.t have|do not have', text, re.I):
++                return None if self.focus == 'identity' else 'no'
++            if re.search(r'ఉంది|ఉన్నాయి|ప్రస్తుత|current|i have', text, re.I):
++                return 'yes'
++        return None
++
++    def walkthrough_reply(self):
++        """Voice summaries only; the complete sourced checklist stays in view()."""
++        if self.focus == 'identity' and self.answers.get('identity') == 'none':
++            self.focus = 'small'
++        if self.focus == 'tax' and self.answers.get('pan') == 'no':
++            self.focus = 'tax_missing'
++        if self.focus == 'tax_missing' and self.answers.get('pan') == 'yes':
++            self.focus = 'tax'
++        if self.focus == 'intro':
++            count = len(checklist(self.answers))
++            return f'SBI ఖాతా కోసం {count} ప్రధాన అంశాలు చూసుకోవాలి. ఒక్కొక్కటిగా చూద్దామా?'
++        if self.focus == 'tax_missing':
++            self.reply_source_ids = ENTRIES['tax']['source_ids']
++            return DOCUMENTS['pan']['missing'].replace('మీ బ్యాంకుతో', 'SBI శాఖతో') + ' తర్వాతి అంశానికి వెళ్దామా?'
++        if self.focus == 'address_missing':
++            self.reply_source_ids = ENTRIES['address']['source_ids']
++            return 'రెండు నెలలు దాటని యుటిలిటీ బిల్లు వంటి అనుమతించిన ఆధారం ఉపయోగపడవచ్చు. ఈ మార్గంలో మూడు నెలల్లో ప్రస్తుత చిరునామాతో OVD ఇవ్వాలి. తర్వాతి అంశానికి వెళ్దామా?'
++        replies = {
++            'identity': 'పేరు, చిరునామా ఉన్న అనుమతించిన గుర్తింపు పత్రం కావాలి; ఆధార్ ఒక్కటే మార్గం కాదు. మీ దగ్గర అలాంటి పత్రం ఉందా?',
++            'address': 'గుర్తింపు పత్రంలో ప్రస్తుత చిరునామా ఉండాలి. మీ పత్రంలో ప్రస్తుత చిరునామా ఉందా?',
++            'tax': 'PAN ఉంటే SBIకి చూపించడానికి సిద్ధంగా ఉంచండి; నంబరు ఇక్కడ చెప్పవద్దు. మీ దగ్గర PAN ఉందా?',
++            'existing': 'SBIలో KYC పూర్తై వివరాలు మారకపోతే, అవే పత్రాలు మళ్లీ అవసరం కాకపోవచ్చు. మీ వివరాలు మారలేదా?',
++            'visit': 'దరఖాస్తు, ఫోటో విధానం, కాపీల సంఖ్యను SBI శాఖతో నిర్ధారించండి. ఈ వివరాలు శాఖను అడుగుతారా?',
++            'small': 'గుర్తింపు పత్రం లేకపోతే పరిమితులున్న Small Account గురించి SBIని అడగవచ్చు. దీని గురించి శాఖను అడుగుతారా?',
++            'done': 'ప్రధాన అంశాలు పూర్తయ్యాయి. మొత్తం జాబితా చెప్పాలా?',
++        }
++        if self.focus in ENTRIES:
++            self.reply_source_ids = ENTRIES[self.focus]['source_ids']
++        self.last_document = {'tax': 'pan', 'identity': 'identity', 'address': 'address',
++                              'existing': 'kyc', 'small': 'identity', 'visit': 'visit'}.get(self.focus, self.last_document)
++        return replies.get(self.focus, replies['done'])
++
+     def respond(self, text, details, fallback, last_reply):
+-        # Only onboarding/progression lives here. Questions and pronouns have
+-        # already been handled by dialogue.handle_interruption, before ingest.
++        # Questions/pronouns have already been handled by dialogue.py.
++        answer = self.walkthrough_answer(text)
+         self.interrupted = False
+         self.saved_focus = ''
+         self.side_pending = ''
+@@ -136,36 +187,49 @@
+             return LIMIT
+         if details['bank'] != 'SBI' or details['intent'] != 'open_account':
+             return fallback
+-        if not (details['town'] or details['branch'] or self.location_skipped):
+-            return fallback
++        # A natural opening starts here; location is optional for preparation.
++        if not self.focus and not self.pending:
++            self.focus = 'intro'
++            return self.walkthrough_reply()
+         if self.account_for_self is False and self.age_subject == 'unclear':
+             self.pending = 'age_subject'
+-            return '\u0c16\u0c3e\u0c24\u0c3e \u0c0e\u0c35\u0c30\u0c3f \u0c15\u0c4b\u0c38\u0c02? \u0c35\u0c2f\u0c38\u0c41 \u0c16\u0c3e\u0c24\u0c3e\u0c26\u0c3e\u0c30\u0c3f\u0c26\u0c3e \u0c32\u0c47\u0c26\u0c3e \u0c2e\u0c40\u0c26\u0c3e?'
++            return 'ఖాతా ఎవరి కోసం? వయసు ఖాతాదారిదా లేదా మీదా?'
+         if self.pending == 'age_subject':
+-            return '\u0c35\u0c2f\u0c38\u0c41 \u0c2e\u0c40\u0c26\u0c3e, \u0c32\u0c47\u0c26\u0c3e \u0c16\u0c3e\u0c24\u0c3e \u0c24\u0c46\u0c30\u0c3f\u0c1a\u0c47 \u0c35\u0c4d\u0c2f\u0c15\u0c4d\u0c24\u0c3f\u0c26\u0c3e?'
+-        for key, question in ONBOARDING_QUESTIONS.items():
+-            if key == 'existing':
+-                continue
+-            if self.answers.get(key) != 'yes':
+-                self.pending = key
+-                return question
+-        if 'existing' not in self.answers:
+-            self.pending = 'existing'
+-            return ONBOARDING_QUESTIONS['existing']
++            return 'వయసు మీదా, లేదా ఖాతా తెరిచే వ్యక్తిదా?'
++        unanswered = [key for key in ONBOARDING_QUESTIONS if key not in self.answers]
++        if unanswered:
++            key = unanswered[0]
++            if self.pending in unanswered and re.fullmatch(r'\s*(తర్వాత|తరువాత|next|skip)[.!\s]*', text, re.I):
++                key = unanswered[(unanswered.index(self.pending) + 1) % len(unanswered)]
++            self.pending = key
++            return ONBOARDING_QUESTIONS[key]
+         self.pending = ''
+-        if re.search(r'బ్యాలెన్స్|minimum|balance|fees|ఛార్జీ', text, re.I):
+-            self.focus = 'balance'
+-        elif re.search(r'తర్వాత|next', text, re.I):
+-            keys = [item['id'] for item in checklist(self.answers)]
+-            self.focus = keys[(keys.index(self.focus) + 1) % len(keys)] if self.focus in keys else keys[0]
+-        if self.answers.get('identity') == 'none':
+-            self.focus = 'small'
+-        elif self.focus == 'small':
+-            self.focus = 'identity'
+-        if not self.focus:
+-            self.focus = checklist(self.answers)[0]['id']
+-        self.last_document = {'tax': 'pan', 'identity': 'identity', 'address': 'address', 'existing': 'kyc', 'small': 'identity', 'visit': 'visit'}.get(self.focus, self.last_document)
+-        self.reply_source_ids = ENTRIES[self.focus]['source_ids']
+-        if self.focus == 'tax' and self.answers.get('pan') == 'no':
+-            return 'PAN లేదని గుర్తుంచుకున్నాను. RBI మార్గదర్శకంలో Form 60 ఉంది; SBI లింకులో ఇప్పుడు Form 97 ఉంది. మీకు వర్తించే తాజా ప్రకటన, అర్హతను బ్రాంచ్‌తో నిర్ధారించండి. PAN లేకపోతే ఖాతా తెరవలేరని ఊహించవద్దు.'
+-        return ENTRIES[self.focus]['text']
++        keys = [item['id'] for item in checklist(self.answers)]
++        if self.focus in ('', 'intro'):
++            self.focus = keys[0]
++            return self.walkthrough_reply()
++        if answer:
++            if self.focus == 'tax':
++                self.answers['pan'] = answer
++                if answer == 'no':
++                    self.focus = 'tax_missing'
++                    return self.walkthrough_reply()
++            elif self.focus == 'identity':
++                if answer == 'no':
++                    self.pending = self.side_pending = 'identity_options'
++                    return 'ఆధార్ ఒక్కటే మార్గం కాదు; పాస్‌పోర్ట్, ఓటర్ కార్డు వంటి ఇతర అనుమతించిన పత్రాలు కూడా ఉన్నాయి. వీటిలో ఏదైనా ఉందా?'
++                self.answers['identity'] = 'available'
++            elif self.focus == 'address':
++                self.answers['address'] = 'current' if answer == 'yes' else 'old'
++                if answer == 'no':
++                    self.focus = 'address_missing'
++                    return self.walkthrough_reply()
++        if answer or re.fullmatch(r'\s*(తర్వాత|తరువాత|next|skip|సరే|కొనసాగించు|continue|yes|అవును)[.!\s]*', text, re.I):
++            # Use the old position when an answer removes the current item.
++            current = self.focus.removesuffix('_missing')
++            if current in keys:
++                index = keys.index(current) + 1
++                self.focus = keys[index] if index < len(keys) else 'done'
++            elif current == 'address':
++                self.focus = 'tax'
++        return self.walkthrough_reply()
+--- backend/dialogue.py (before)
++++ backend/dialogue.py
+@@ -47,7 +47,7 @@
+     return reply or document['explanation']
+ 
+ 
+-def handle_interruption(text, prep, last_reply, pending_question):
++def handle_interruption(text, prep, last_reply, pending_question, bank=None):
+     """Return a reply or None to allow a factual answer/correction to progress."""
+     if matches(REPEAT, text):
+         return last_reply or 'ఇంకా సమాధానం ఇవ్వలేదు. ఏ విషయం గురించి తెలుసుకోవాలనుకుంటున్నారు?'
+@@ -55,12 +55,13 @@
+         prep.interrupted = False
+         prep.side_pending = ''
+         prep.reply_source_ids = []
+-        if prep.saved_focus:
+-            prep.focus = prep.saved_focus
++        prep.focus = prep.saved_focus
+         prep.saved_focus = ''
+         # Re-present the saved question without interpreting 'okay' as consent.
+         if pending_question:
+             return pending_question
++        if prep.focus:
++            return prep.walkthrough_reply()
+         return None
+ 
+     topic = topic_in(text)
+@@ -112,7 +113,8 @@
+                 prep.answers['address'] = 'current'
+         if missing:
+             if topic == 'pan':
+-                return discuss(prep, topic, DOCUMENTS['pan']['missing'])
++                branch = f'{bank} శాఖతో' if bank else 'మీ బ్యాంకుతో'
++                return discuss(prep, topic, DOCUMENTS['pan']['missing'].replace('మీ బ్యాంకుతో', branch))
+             if topic in ('aadhaar', 'passport', 'voter', 'licence', 'identity'):
+                 prep.side_pending = 'identity_options'
+                 # Reuse the pending slot only when onboarding has no saved
+@@ -120,8 +122,10 @@
+                 if not prep.pending:
+                     prep.pending = 'identity_options'
+                 return discuss(prep, topic, ENTRIES['identity']['text'] + ' వీటిలో ఏదైనా పత్రం ఉందా?')
+-            return discuss(prep, topic, DOCUMENTS[topic].get('missing', 'ఈ పత్రానికి వర్తించే ప్రత్యామ్నాయం మీ బ్యాంకుతో నిర్ధారించండి. పత్రం నంబరు ఇక్కడ చెప్పవద్దు.'))
+-        return discuss(prep, topic)
++            reply = DOCUMENTS[topic].get('missing', 'ఈ పత్రానికి వర్తించే ప్రత్యామ్నాయం మీ బ్యాంకుతో నిర్ధారించండి. పత్రం నంబరు ఇక్కడ చెప్పవద్దు.')
++            return discuss(prep, topic, reply.replace('మీ బ్యాంకుతో', f'{bank} శాఖతో') if bank else reply)
++        reply = DOCUMENTS[topic]['explanation']
++        return discuss(prep, topic, reply.replace('మీ బ్యాంకుతో', f'{bank} శాఖతో') if bank else reply)
+ 
+     if question or matches(r'అర్థం కాలేదు|అర్థం కావడం లేదు|నాకు తెలియట్లేదు|confused|huh', text):
+         if prep.pending and not topic:
+--- backend/knowledge.py (before)
++++ backend/knowledge.py
+@@ -57,9 +57,9 @@
+ DOCUMENTS = {
+     'pan': {'entry': 'tax', 'source_ids': ['rbi', 'sbi_declaration'],
+             'explanation': 'PAN అంటే Permanent Account Number. ఇది పన్ను గుర్తింపుకు ఉపయోగించే సంఖ్య. బ్యాంకు KYCలో PAN లేదా వర్తించే ప్రకటన గురించి అడుగుతుంది. మీ PAN నంబరు ఇక్కడ చెప్పవద్దు.',
+-            'missing': 'PAN లేకపోతే వర్తించే ప్రకటన మార్గం గురించి మీ బ్యాంకుతో మాట్లాడవచ్చు. RBI మార్గదర్శకంలో Form 60 ఉంది; SBI లింకులో Form 97 ఉంది. మీకు వర్తించే తాజా ఫారం, అర్హతను బ్రాంచ్‌తో నిర్ధారించండి.'},
++            'missing': 'PAN లేకపోతే సాధారణంగా Form 60 ప్రకటన ఇస్తారు. ప్రస్తుతం వర్తించే ఫారాన్ని మీ బ్యాంకుతో నిర్ధారించండి.'},
+     'declaration': {'entry': 'tax', 'source_ids': ['rbi', 'sbi_declaration'],
+-                    'explanation': 'PAN లేనప్పుడు వర్తించే వివరాలను తెలియజేసే ప్రకటన గురించి అడుగుతున్నారు. RBI పేజీ Form 60ను, SBI లింకు Form 97ను చూపుతున్నాయి. మీకు ఏ ఫారం వర్తిస్తుందో బ్రాంచ్‌తో నిర్ధారించండి; ఇక్కడ ఫారం నింపాల్సిన అవసరం లేదు.'},
++                    'explanation': 'PAN లేనప్పుడు సాధారణంగా Form 60లో వివరాలను తెలియజేస్తారు. ప్రస్తుతం వర్తించే ఫారాన్ని మీ బ్యాంకుతో నిర్ధారించండి; ఇక్కడ ఫారం నింపాల్సిన అవసరం లేదు.'},
+     'kyc': {'entry': 'existing', 'source_ids': ['faq'],
+             'explanation': 'KYC అంటే Know Your Customer. బ్యాంకు మీ గుర్తింపు, చిరునామా వంటి వివరాలను తనిఖీ చేసే ప్రక్రియ. అది ప్రత్యేకంగా మీ దగ్గర ఉండాల్సిన ఒక కార్డు కాదు.'},
+     'identity': {'entry': 'identity', 'source_ids': ['rbi', 'sbi_kyc'], 'explanation': ENTRIES['identity']['text']},
+--- backend/test_conversation.py (before)
++++ backend/test_conversation.py
+@@ -18,8 +18,7 @@
+     first = c.advance("నేను SBI bankలో ఖాతా తెరవాలి")
+     assert first["details"] == {"intent": "open_account", "bank": "SBI", "town": None, "branch": None}
+     assert first["awaiting"] == ""
+-    assert "పాస్‌పోర్ట్" in first["reply"]
+-    assert "ఊహిస్తున్నాను" in first["reply"]
++    assert "SBI" in first["reply"] and len(first["reply"]) < 200
+     second = c.advance("విజయవాడ")
+     assert second["details"]["town"] == "విజయవాడ"
+     assert second["awaiting"] == ""
+@@ -77,7 +76,7 @@
+     cleared = c.advance("విజయవాడ కాదు")
+     assert cleared["details"]["town"] is None
+     assert cleared["awaiting"] == ""
+-    assert "ఊహిస్తున్నాను" in cleared["reply"]
++    assert cleared["reply"] == ONBOARDING_QUESTIONS['single']
+ 
+ 
+ def test_telugu_account_variations():
+@@ -92,16 +91,16 @@
+     c.advance("SBI ఖాతా తెరవాలి")
+     result = c.advance("ఇంకా తెలియదు")
+     assert result["details"]["town"] is None
+-    assert "?" not in result["reply"]
+-
+-
+-def test_first_checklist_uses_reviewed_facts_without_confirming_assumptions():
++    assert result['reply'] == ONBOARDING_QUESTIONS['single']
++
++
++def test_checklist_request_waits_for_onboarding_without_assuming_answers():
+     c = Conversation()
+     c.advance("SBI ఖాతా తెరవాలి")
+     c.advance("గుంటూరు")
+     result = c.advance("ఏ పత్రాలు అవసరం?")
+     assert result['preparation']['checklist'] == []  # Assumptions stay out of saved eligibility facts.
+-    assert "PAN" in result["reply"] and "ఆధార్ ఒక్కటే మార్గం కాదు" in result["reply"]
++    assert result['reply'] == ONBOARDING_QUESTIONS['single']
+     assert result['preparation']['answers'].get('adult') is None
+     assert result['preparation']['answers'].get('resident') is None
+     assert result['preparation']['answers'].get('single') is None
+@@ -194,16 +193,17 @@
+     c.advance("మళ్ళీ చెప్పు")
+     c.advance("అది ఏంటి?")
+     resumed = c.advance("తర్వాత")
+-    assert c.preparation.focus == ids[(ids.index(original_focus) + 1) % len(ids)]
++    assert c.preparation.focus.removesuffix('_missing') == original_focus
+     assert resumed["preparation"]["checklist"]
+ 
+ 
+-def test_intent_asked_once_then_bank_then_location():
++def test_intent_asked_once_then_bank_then_walkthrough():
+     c = Conversation()
+     assert c.advance("నమస్తే")["awaiting"] == "intent"
+     assert c.advance("ఖాతా తెరవాలి")["awaiting"] == "bank"
+     result = c.advance("ఎస్ బి ఐ")
+-    assert result["awaiting"] == "location"
++    assert result["awaiting"] == ""
++    assert result['preparation']['focus'] == 'intro'
+     assert result["reply"].count("?") == 1
+ 
+ 
+--- backend/test_preparation.py (before)
++++ backend/test_preparation.py
+@@ -1,8 +1,10 @@
+ import httpx
++import pytest
+ from fastapi.testclient import TestClient
+ from backend import main
+ from backend.conversation import Conversation, store
+-from backend.knowledge import ENTRIES
++from backend.knowledge import ENTRIES, checklist
++from backend.preparation import ONBOARDING_QUESTIONS
+ from backend.test_main import mock_gnani, wav_bytes
+ 
+ 
+@@ -42,11 +44,14 @@
+     c.advance('PAN అంటే ఏంటి?')
+     result = c.advance('నాకు అది లేదు')
+     assert result['preparation']['answers']['pan'] == 'no'
+-    assert 'Form 60' in result['reply'] and 'Form 97' in result['reply']
++    assert 'Form 60' in result['reply'] and 'Form 97' not in result['reply']
++    assert 'SBI శాఖతో' in result['reply'] and 'మీ బ్యాంకుతో' not in result['reply']
+     assert c.advance('మళ్ళీ చెప్పు')['reply'] == result['reply']
+     tax = next(i for i in result['preparation']['checklist'] if i['id'] == 'tax')
+     assert tax['status'] == 'needs_confirmation'
+     assert tax['branch_confirmation']
++    assert 'Form 97' in tax['exceptions']
++    assert 'Form No. 97' in tax['sources'][1]['title']
+     assert all(s['checked_on'] == '2026-11-08' and s['url'].startswith('https://') for s in tax['sources'])
+     result = c.advance('PAN ఉంది')
+     assert result['preparation']['answers']['pan'] == 'yes'
+@@ -127,3 +132,104 @@
+         assert len(restored['turns']) == 1
+         assert restored['turns'][-1]['reply'] == turn['reply']
+         assert client.post('/api/reply-audio', json=request).status_code == 200
++
++
++def natural_walkthrough():
++    c = Conversation()
++    opening = c.advance('నేను SBIలో ఖాతా తెరవాలనుకుంటున్నా.')
++    assert 'SBI' in opening['reply'] and '4' in opening['reply']
++    assert len(opening['reply']) < 200
++    assert opening['reply'].count('?') == 1
++    for key, answer in [('single', 'అవును'), ('adult', 'అవును'), ('resident', 'అవును'), ('existing', 'లేదు')]:
++        question = c.advance('అవును') if key == 'single' else result
++        assert question['reply'] == ONBOARDING_QUESTIONS[key]
++        result = c.advance(answer)
++    assert result['preparation']['focus'] == 'identity'
++    return c, result
++
++
++def test_natural_opening_onboards_then_covers_one_item_per_turn():
++    c, identity = natural_walkthrough()
++    assert 'PAN' not in identity['reply'] and 'కాపీల' not in identity['reply']
++    address = c.advance('ఉంది')
++    assert address['preparation']['focus'] == 'address'
++    assert 'PAN' not in address['reply']
++    pan = c.advance('అవును')
++    assert pan['preparation']['focus'] == 'tax' and 'PAN' in pan['reply']
++    visit = c.advance('PAN ఉంది')
++    assert visit['preparation']['focus'] == 'visit'
++    assert visit['preparation']['answers']['pan'] == 'yes'
++    assert 'PAN' not in visit['reply']
++    for turn in (identity, address, pan, visit):
++        assert turn['reply'].count('?') == 1
++        assert len(turn['reply']) < 200
++        assert turn['preparation']['checklist'] == checklist(turn['preparation']['answers'])
++
++
++@pytest.mark.parametrize('answer', ['లేదు', 'PAN లేదు'])
++def test_walkthrough_no_pan_keeps_fact_on_continue(answer):
++    c, _ = natural_walkthrough()
++    c.advance('తర్వాత')
++    c.advance('తర్వాత')
++    missing = c.advance(answer)
++    assert 'Form 60' in missing['reply'] and 'Form 97' not in missing['reply']
++    assert missing['reply'].count('SBI శాఖతో') == 1
++    assert missing['reply'].count('?') == 1
++    assert c.advance('మళ్ళీ చెప్పు')['reply'] == missing['reply']
++    visit = c.advance('అవును')
++    assert visit['preparation']['focus'] == 'visit'
++    assert visit['preparation']['answers']['pan'] == 'no'
++
++
++@pytest.mark.parametrize('bank', [None, 'SBI', 'HDFC'])
++def test_hypothetical_pan_reply_uses_known_bank_without_saving_possession(bank):
++    c = Conversation()
++    c.details['bank'] = bank
++    reply = c.advance('PAN లేకపోతే ఏం చేయాలి?')
++    assert 'Form 60' in reply['reply'] and 'Form 97' not in reply['reply']
++    assert (f'{bank} శాఖతో' if bank else 'మీ బ్యాంకుతో') in reply['reply']
++    assert 'pan' not in reply['preparation']['answers']
++
++
++def test_repeat_next_full_list_preserve_panel_and_do_not_answer_onboarding():
++    c = Conversation()
++    first = c.advance('SBI account open')
++    assert c.advance('మళ్ళీ చెప్పు')['reply'] == first['reply']
++    c.advance('అవును')
++    full = c.advance('మొత్తం జాబితా చెప్పు')
++    assert 'PAN' in full['reply'] and 'పాస్‌పోర్ట్' in full['reply']
++    assert c.preparation.pending == 'single' and c.preparation.answers == {}
++    skipped = c.advance('తర్వాత')
++    assert skipped['reply'] == ONBOARDING_QUESTIONS['adult']
++    assert skipped['preparation']['answers'] == {}
++    c, identity = natural_walkthrough()
++    full = c.advance('మొత్తం జాబితా చెప్పు')
++    assert 'PAN' in full['reply'] and 'ఫోటో' in full['reply']
++    assert full['preparation']['focus'] == 'identity'
++    assert full['preparation']['checklist'] == identity['preparation']['checklist']
++    assert c.advance('మళ్ళీ చెప్పు')['reply'] == full['reply']
++    assert c.advance('తర్వాత')['preparation']['focus'] == 'address'
++
++
++@pytest.mark.parametrize('command', ['కొనసాగించు', 'తర్వాత'])
++def test_document_interruption_resumes_same_item_then_progresses(command):
++    c, identity = natural_walkthrough()
++    explanation = c.advance('PAN అంటే ఏంటి?')
++    assert 'Permanent Account Number' in explanation['reply']
++    assert c.preparation.saved_focus == 'identity'
++    c.advance('నాకు అది లేదు')
++    resumed = c.advance(command)
++    assert resumed['reply'] == identity['reply']
++    assert resumed['preparation']['focus'] == 'identity'
++    assert resumed['preparation']['answers']['pan'] == 'no'
++    assert c.advance('ఉంది')['preparation']['focus'] == 'address'
++
++
++def test_address_no_explains_one_item_and_continue_preserves_old_address():
++    c, _ = natural_walkthrough()
++    c.advance('ఉంది')
++    missing = c.advance('లేదు')
++    assert 'మూడు నెలల్లో' in missing['reply'] and 'PAN' not in missing['reply']
++    pan = c.advance('అవును')
++    assert pan['preparation']['focus'] == 'tax'
++    assert pan['preparation']['answers']['address'] == 'old'
+--- backend/test_gemini.py (before)
++++ backend/test_gemini.py
+@@ -88,7 +88,7 @@
+         "session_id": session.id,
+         "text": "నాకు బ్యాంక్ అకౌంట్ తెరవాలి. దానికి ఏం పత్రాలు కావాలి?",
+     }).json()
+-    assert "చిన్న SBI జాబితా" in first["reply"]
++    assert "SBI" in first["reply"] and len(first["reply"]) < 200
+     assert first["details"]["bank"] == "SBI"
+     assert first["details"]["town"] == "విజయవాడ"
+ 
+@@ -96,14 +96,14 @@
+     second = client.post("/api/transcribe", data={"session_id": session.id}, files={
+         "audio": ("recording.wav", wav_bytes(), "audio/wav"),
+     }).json()
+-    assert "Form 60" in second["reply"] and "Form 97" in second["reply"]
++    assert "Form 60" in second["reply"] and "Form 97" not in second["reply"]
+     assert "Permanent Account Number" not in second["reply"]
+     assert session.preparation.pending == "existing"
+     assert second["preparation"]["pending"] == "existing"
+ 
+     third = client.post("/api/conversation", json={"session_id": session.id, "text": followup_text}).json()
+     assert "Form 97" in third["reply"]
+-    assert "సమానమని" in third["reply"]
++    assert "SBI శాఖతో" in third["reply"]
+     assert session.preparation.pending == "existing"
+     assert [turn["session"]["bank"] for turn in seen] == ["SBI", "SBI", "SBI"]
+     assert seen[1]["message"] == unclear_form_text
+@@ -119,7 +119,7 @@
+         "session_id": session.id,
+         "text": "నాకు బ్యాంక్ అకౌంట్ తెరవాలి. దానికి ఏం పత్రాలు కావాలి?",
+     }).json()
+-    assert "చిన్న SBI జాబితా" in response["reply"]
++    assert "SBI" in response["reply"] and len(response["reply"]) < 200
+     assert response["details"]["bank"] == "SBI"
+     assert response["details"]["town"] == "విజయవాడ"
+ 
+@@ -199,9 +199,7 @@
+     assert response["preparation"]["answers"].get("single") is None
+     assert response["preparation"]["answers"].get("adult") is None
+     assert response["preparation"]["answers"].get("resident") is None
+-    assert "ఊహిస్తున్నాను" in response["reply"]
+-    assert "PAN" in response["reply"]
+-    assert "ఆధార్ ఒక్కటే మార్గం కాదు" in response["reply"]
++    assert "ఒక్కొక్కటిగా" in response["reply"] and len(response["reply"]) < 200
+     assert seen[0]["message"] == prompt
+ 
+ 
+@@ -218,10 +216,9 @@
+     assert second["details"]["bank"] == "SBI"
+     assert second["details"]["town"] == "అనంతపూర్"
+     assert second["awaiting"] == ""
+-    assert second["preparation"]["pending"] == ""
++    assert second["preparation"]["pending"] == "single"
+     assert second["preparation"]["answers"] == {}
+-    assert "SBI అనంతపూర్ కోసం" in second["reply"]
+-    assert "PAN" in second["reply"]
++    assert second["reply"] == gemini.ONBOARDING_QUESTIONS['single']
+     assert [item["session"]["pending_onboarding_step"] for item in seen] == ["none", "none"]
+ 
+ 
+@@ -235,8 +232,7 @@
+     }).json()
+     assert response["details"]["intent"] == "open_account"
+     assert response["details"]["bank"] == "SBI"
+-    assert "PAN" in response["reply"]
+-    assert "ఊహిస్తున్నాను" in response["reply"]
++    assert "SBI" in response["reply"] and len(response["reply"]) < 200
+     assert response["preparation"]["answers"] == {}
+ 
+ 
+--- backend/test_main.py (before)
++++ backend/test_main.py
+@@ -101,7 +101,7 @@
+     assert response.json()["details"]["bank"] == "SBI"
+     assert response.json()["details"]["intent"] == "open_account"
+     assert response.json()["awaiting"] == ""
+-    assert "PAN" in response.json()["reply"]
++    assert "SBI" in response.json()["reply"] and len(response.json()["reply"]) < 200
+     assert response.json()["preparation"]["answers"] == {}
+ 
+ 
+@@ -155,7 +155,7 @@
+         assert request.headers["X-API-Key-ID"] == "test-only-not-a-real-key"
+         payload = json.loads(request.read())
+         assert "SBI" in payload["text"]
+-        assert "ఊహిస్తున్నాను" in payload["text"]
++        assert "ఒక్కొక్కటిగా" in payload["text"] and len(payload["text"]) < 200
+         assert payload["voice"] == "Lavanya"
+         assert payload["model"] == "timbre-v2.5"
+         assert payload["language"] == "te-IN"
+--- verify_preparation.py (before)
++++ verify_preparation.py
+@@ -1,31 +1,80 @@
+-"""Local synthetic conversation smoke test through Vite; no speech-provider calls."""
++"""Synthetic API smoke journey through Vite; use a backend with Gemini disabled."""
+ import os
++from pathlib import Path
+ import httpx
+ 
+ 
+ if __name__ == '__main__':
+     base_url = os.getenv('VOICE_COMPANION_BASE_URL', 'http://127.0.0.1:5173')
++    transcript = ['# Guided SBI preparation smoke transcript', '']
+     with httpx.Client(base_url=base_url, timeout=15) as client:
+         sid = None
+-        for text in ['నాకు SBIలో account తెరవాలి', 'అనంతపురం', 'అవును', 'అవును', 'అవును', 'అవును', 'లేదు', 'కాదు, బెంగళూరు', 'బ్రాంచ్ తెలియదు', 'PAN అంటే ఏంటి?', 'నాకు అది లేదు']:
++        turns = []
++
++        def say(text, *, focus=None, pending=None):
++            global sid
+             response = client.post('/api/conversation', json={'text': text, 'session_id': sid})
+             response.raise_for_status()
+             turn = response.json()
+             sid = turn['session_id']
+             assert turn['reply'].count('?') <= 1
++            if focus is not None:
++                assert turn['preparation']['focus'] == focus, turn
++            if pending is not None:
++                assert turn['preparation']['pending'] == pending, turn
++            turns.append(turn)
++            transcript.extend([f'## Turn {len(turns)}', '', f'User: {text}', '', f"Assistant: {turn['reply']}", ''])
++            return turn
++
++        first = say('నేను SBIలో ఖాతా తెరవాలనుకుంటున్నా.', focus='intro')
++        assert len(first['reply']) < 200 and 'SBI' in first['reply']
++        say('అవును', pending='single')
++        say('అవును', pending='adult')
++        say('అవును', pending='resident')
++        say('అవును', pending='existing')
++        identity = say('లేదు', focus='identity', pending='')
++        say('అనంతపురం', focus='identity')
++        say('కాదు, బెంగళూరు', focus='identity')
++        say('బ్రాంచ్ తెలియదు', focus='identity')
++        say('ఉంది', focus='address')
++        say('అవును', focus='tax')
++        say('PAN అంటే ఏంటి?')
++        say('నాకు అది లేదు')
++        resumed = say('కొనసాగించు', focus='tax_missing')
++        assert resumed['preparation']['answers']['pan'] == 'no'
++        missing = resumed
++        assert 'Form 60' in missing['reply'] and 'Form 97' not in missing['reply']
++        assert 'SBI శాఖతో' in missing['reply']
++        assert say('మళ్ళీ చెప్పు')['reply'] == missing['reply']
++        full = say('మొత్తం జాబితా చెప్పు', focus='tax_missing')
++        assert 'PAN' in full['reply'] and 'ఫోటో' in full['reply']
++        visit = say('అవును', focus='visit')
++        assert visit['preparation']['answers']['pan'] == 'no'
++        say('PAN లేకపోతే ఏం చేయాలి?')
++        assert say('తర్వాత', focus='visit')['reply'] == visit['reply']
++        turn = say('అవును', focus='done')
+         assert turn['details']['bank'] == 'SBI'
+         assert turn['details']['town'] == 'బెంగళూరు'
++        assert turn['details']['branch'] is None
+         assert turn['preparation']['answers']['pan'] == 'no'
+         assert turn['preparation']['answers']['single'] == 'yes'
+         assert turn['preparation']['answers']['adult'] == 'yes'
+         assert turn['preparation']['answers']['resident'] == 'yes'
+         assert turn['preparation']['answers']['existing'] == 'no'
+         assert turn['preparation']['checklist']
++        assert identity['preparation']['checklist']
++        turn = say('అవును', focus='done')
++        assert 'PAN' in turn['reply'] and 'ఫోటో' in turn['reply']
+         restored = client.post('/api/conversation/restore', json={'session_id': sid}).json()
+         assert restored['preparation'] == turn['preparation']
+-        assert len(restored['turns']) == 11
+-        changed = client.post('/api/conversation', json={'text': 'SBI కాదు HDFC bank', 'session_id': sid}).json()
++        assert restored['turns'] == [{key: t[key] for key in ('turn_id', 'transcript', 'reply')} for t in turns]
++        changed = say('SBI కాదు HDFC bank')
+         assert changed['details']['bank'] == 'HDFC'
+         assert not changed['preparation']['checklist']
+         client.post('/api/conversation/reset', json={'session_id': sid}).raise_for_status()
+-        print('PASS: 11 synthetic turns, corrections, missing PAN, source-backed checklist, restore, unsupported-bank invalidation; Vite proxy healthy.')
++        assert client.post('/api/conversation/restore', json={'session_id': sid}).status_code == 404
++        output = Path('artifacts/preparation-smoke-transcript.md')
++        output.parent.mkdir(exist_ok=True)
++        output.write_text('\n'.join(transcript), encoding='utf-8')
++        print('\n'.join(transcript))
++        print(f'PASS: {len(turns)} synthetic turns; onboarding, one-item progression, PAN absence, repeat/full list, interruption/resume, corrections, restore/reset, unsupported bank. Vite proxy healthy. Transcript: {output}')
